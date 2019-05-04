@@ -200,7 +200,7 @@ generate
 genvar i;
 for (i = 0; i < 32; i = i + 1) begin
 	if (entries[i][35:32] == tag_wb) begin
-		commit_vals <= wb_val;
+		commit_vals[i] <= wb_val;
 	end
 end
 endgenerate
