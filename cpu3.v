@@ -341,61 +341,61 @@ reg [2:0] xclass;
 always @* begin
 	case (insn[31:24])
 		8'h00: begin
-			execution_unit = EU_MEM;
-			xclass = C_DXB;
+			execution_unit <= EU_MEM;
+			xclass <= C_DXB;
 		end
 		8'h01: begin
-			execution_unit = EU_MEM;
-			xclass = C_XAB;
+			execution_unit <= EU_MEM;
+			xclass <= C_XAB;
 		end
 		8'h02: begin
-			execution_unit = EU_ALU;
-			xclass = C_DIMM16;
+			execution_unit <= EU_ALU;
+			xclass <= C_DIMM16;
 		end
 		8'h03: begin
-			execution_unit = EU_MEM;
-			xclass = C_XAX;
+			execution_unit <= EU_MEM;
+			xclass <= C_XAX;
 		end
 		8'h04: begin
-			execution_unit = EU_MEM;
-			xclass = C_DXX;
+			execution_unit <= EU_MEM;
+			xclass <= C_DXX;
 		end
 		8'h05: begin
-			execution_unit = EU_ALU;
-			xclass = C_DXB;
+			execution_unit <= EU_ALU;
+			xclass <= C_DXB;
 		end
 		8'h06, 8'h07, 8'h0a, 8'h0b,
 		8'h0c, 8'h0e: begin
-			execution_unit = EU_ALU;
-			xclass = C_DAB;
+			execution_unit <= EU_ALU;
+			xclass <= C_DAB;
 		end
 		8'h0d: begin
-			execution_unit = EU_ALU;
-			xclass = C_DXB;
+			execution_unit <= EU_ALU;
+			xclass <= C_DXB;
 		end
 		8'h08, 8'h09: begin
-			execution_unit = EU_MULDIV;
-			xclass = C_DAB;
+			execution_unit <= EU_MULDIV;
+			xclass <= C_DAB;
 		end
 		8'h0f: begin
-			execution_unit = EU_BRANCH;
-			xclass = C_XAB;
+			execution_unit <= EU_BRANCH;
+			xclass <= C_XAB;
 		end
 		8'h10, 8'h12, 8'h14, 8'h16,
 		8'h18, 8'h1a, 8'h1c, 8'h1e,
 		8'h20: begin
-			execution_unit = EU_BRANCH;
-			xclass = C_XAX;
+			execution_unit <= EU_BRANCH;
+			xclass <= C_XAX;
 		end
 		8'h11, 8'h13, 8'h15, 8'h17,
 		8'h19, 8'h1b, 8'h1d, 8'h1f,
 		8'h21: begin
-			execution_unit = EU_BRANCH;
-			xclass = C_IMM24;
+			execution_unit <= EU_BRANCH;
+			xclass <= C_IMM24;
 		end
 		default: begin
-			execution_unit = EU_NONE;
-			xclass = C_NONE;
+			execution_unit <= EU_NONE;
+			xclass <= C_NONE;
 		end
 	endcase
 end
@@ -439,6 +439,9 @@ reg [31:0] archregs [0:15];
 
 /* Decoded tag and value fields. */
 
+/* Can we all just agree that the way conbinational @* blocks are implemented
+   confuses everybody? */
+
 reg [5:0] decoded_tag_wb;
 reg [5:0] decoded_tag_a;
 reg [5:0] decoded_tag_b;
@@ -450,60 +453,60 @@ reg [31:0] decoded_value_b;
 always @* begin
 	case (xclass)
 		C_DAB: begin
-			decoded_tag_wb = {1'b1, new_tag_wb};
-			decoded_tag_a = new_tag_a;
-			decoded_tag_b = new_tag_b;
-			decoded_value_a = new_tag_a[5] ? 0 : archregs[nr_a];
-			decoded_value_b = new_tag_b[5] ? 0 : archregs[nr_b];
+			decoded_tag_wb <= {1'b1, new_tag_wb};
+			decoded_tag_a <= new_tag_a;
+			decoded_tag_b <= new_tag_b;
+			decoded_value_a <= new_tag_a[5] ? 0 : archregs[nr_a];
+			decoded_value_b <= new_tag_b[5] ? 0 : archregs[nr_b];
 		end
 		C_DXB: begin
-			decoded_tag_wb = {1'b1, new_tag_wb};
-			decoded_tag_a = 0;
-			decoded_tag_b = new_tag_b;
-			decoded_value_a = 0;
-			decoded_value_b = new_tag_b[5] ? 0 : archregs[nr_b];
+			decoded_tag_wb <= {1'b1, new_tag_wb};
+			decoded_tag_a <= 0;
+			decoded_tag_b <= new_tag_b;
+			decoded_value_a <= 0;
+			decoded_value_b <= new_tag_b[5] ? 0 : archregs[nr_b];
 		end
 		C_DXX: begin
-			decoded_tag_wb = {1'b1, new_tag_wb};
-			decoded_tag_a = 0;
-			decoded_tag_b = 0;
-			decoded_value_a = 0;
-			decoded_value_b = 0;
+			decoded_tag_wb <= {1'b1, new_tag_wb};
+			decoded_tag_a <= 0;
+			decoded_tag_b <= 0;
+			decoded_value_a <= 0;
+			decoded_value_b <= 0;
 		end
 		C_XAB: begin
-			decoded_tag_wb = 0;
-			decoded_tag_a = new_tag_a;
-			decoded_tag_b = new_tag_b;
-			decoded_value_a = new_tag_a[5] ? 0 : archregs[nr_a];
-			decoded_value_b = new_tag_b[5] ? 0 : archregs[nr_b];
+			decoded_tag_wb <= 0;
+			decoded_tag_a <= new_tag_a;
+			decoded_tag_b <= new_tag_b;
+			decoded_value_a <= new_tag_a[5] ? 0 : archregs[nr_a];
+			decoded_value_b <= new_tag_b[5] ? 0 : archregs[nr_b];
 		end
 		C_XAX: begin
-			decoded_tag_wb = 0;
-			decoded_tag_a = new_tag_a;
-			decoded_tag_b = 0;
-			decoded_value_a = new_tag_a[5] ? 0 : archregs[nr_a];
-			decoded_value_b = 0;
+			decoded_tag_wb <= 0;
+			decoded_tag_a <= new_tag_a;
+			decoded_tag_b <= 0;
+			decoded_value_a <= new_tag_a[5] ? 0 : archregs[nr_a];
+			decoded_value_b <= 0;
 		end
 		C_DIMM16: begin
-			decoded_tag_wb = {1'b1, new_tag_wb};
-			decoded_tag_a = 0;
-			decoded_tag_b = 0;
-			decoded_value_a = 0;
-			decoded_value_b = insn[15:0];
+			decoded_tag_wb <= {1'b1, new_tag_wb};
+			decoded_tag_a <= 0;
+			decoded_tag_b <= 0;
+			decoded_value_a <= 0;
+			decoded_value_b <= insn[15:0];
 		end
 		C_IMM24: begin
-			decoded_tag_wb = 0;
-			decoded_tag_a = 0;
-			decoded_tag_b = 0;
-			decoded_value_a = 0;
-			decoded_value_b = insn[23:0];
+			decoded_tag_wb <= 0;
+			decoded_tag_a <= 0;
+			decoded_tag_b <= 0;
+			decoded_value_a <= 0;
+			decoded_value_b <= insn[23:0];
 		end
 		default: begin
-			decoded_tag_wb = 0;
-			decoded_tag_a = 0;
-			decoded_tag_b = 0;
-			decoded_value_a = 0;
-			decoded_value_b = 0;
+			decoded_tag_wb <= 0;
+			decoded_tag_a <= 0;
+			decoded_tag_b <= 0;
+			decoded_value_a <= 0;
+			decoded_value_b <= 0;
 		end
 	endcase
 end
