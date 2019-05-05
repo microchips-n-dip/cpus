@@ -102,7 +102,7 @@ always @* begin
 			_tag_a = j;
 		if (found_b[j])
 			_tag_b = j;
-		if (use_next[j] && !using[j] && !found_wb[i])
+		if (use_next[j] && !using[j] && !found_wb[j])
 			/* Return only the most recent writeback name. */
 			_tag_wb = j;
 	end
@@ -162,8 +162,8 @@ wire stop1;
 reg [67:0] out_buf;
 reg [35:0] entries [0:31];
 reg [31:0] commit_vals [0:31];
-reg [3:0] commit_head = 0;
-reg [3:0] commit_tail = 0;
+reg [4:0] commit_head = 0;
+reg [4:0] commit_tail = 0;
 
 /* When clear is set, it enables both stops so nothing advanced and sets
    head to tail. */
@@ -172,7 +172,6 @@ assign stop0 = (commit_head == commit_tail) | clear;
 assign stop1 = (commit_head + 1 == commit_tail) | clear;
 assign empty = stop0;
 assign full = stop1;
-assign out_entry = entry;
 
 always @(posedge clk) begin
 	if (rst) begin
@@ -198,9 +197,10 @@ end
 
 generate
 genvar i;
-for (i = 0; i < 32; i = i + 1) begin
-	if (entries[i][35:32] == tag_wb) begin
-		commit_vals[i] <= wb_val;
+for (i = 0; i < 32; i = i + 1) begin : save_commits_by_tag
+	always @(posedge clk) begin
+		if (entries[i][35:32] == tag_wb)
+			commit_vals[i] <= wb_val;
 	end
 end
 endgenerate
@@ -219,7 +219,10 @@ endmodule
 module
 main(
 	input clk,
-	input rst
+	input rst,
+	input [31:0] in_mem,
+	output [31:0] out_addr,
+	output [31:0] out_mem
 );
 
 /* Push a new instruction onto the pending queue. */
@@ -245,6 +248,11 @@ wire rename;
 
 wire [4:0] new_tag_wb;
 
+/* Operand tags found by the renamer. */
+
+wire [5:0] new_tag_a;
+wire [5:0] new_tag_b;
+
 /* New entry to the commit queue. */
 
 wire [35:0] commit_queue_new_entry;
@@ -256,6 +264,7 @@ wire [31:0] writeback_value;
 
 /* Next entry in the commit queue to retire. */
 
+wire retire_next_commit;
 wire [35:0] commit_queue_retire;
 wire [31:0] retire_value;
 
@@ -268,7 +277,7 @@ _pending_queue(
 	.clear (),
 	.empty (),
 	.full (),
-	.in_insn (),
+	.in_insn (in_mem),
 	.out_insn (insn)
 );
 
@@ -276,24 +285,133 @@ assign nr_wb = insn[19:16];
 assign nr_a = insn[11:8];
 assign nr_b = insn[3:0];
 
-assign rename = get_next_insn && !(
-	insn[31:24] == 8'h01 || insn[31:24] == 8'h03 || insn[31:24] == 8'h0f ||
-	insn[31:24] == 8'h10 || insn[31:24] == 8'h12 || insn[31:24] == 8'h14 ||
-	insn[31:24] == 8'h16 || insn[31:24] == 8'h18 || insn[31:24] == 8'h1a ||
-	insn[31:24] == 8'h1c || insn[31:24] == 8'h1e || insn[31:24] == 8'h20);
+/* Determine which execution unit an instruction should use. */
+
+/* Execution unit enumeration. */
+
+parameter EU_NONE	= 4'h00;
+parameter EU_MEM	= 4'h01;
+parameter EU_ALU	= 4'h02;
+parameter EU_MULDIV	= 4'h04;
+parameter EU_BRANCH	= 4'h08;
+
+/* Instruction class enumeration. */
+
+parameter C_NONE	= 3'h00;
+parameter C_DAB		= 3'h01;
+parameter C_DXB		= 3'h02;
+parameter C_DXX		= 3'h03;
+parameter C_XAB		= 3'h04;
+parameter C_XAX		= 3'h05;
+parameter C_DIMM16	= 3'h06;
+parameter C_IMM24	= 3'h07;
+
+/* Instructions:
+   ----- MEMORY INSTRUCTIONS -----
+   0x00		- LOAD	- EU_MEM
+   0x01		- STORE	- EU_MEM
+   0x02		- LDI	- EU_ALU
+   0x03		- PUSH	- EU_MEM
+   0x04		- POP	- EU_MEM
+   0x05		- MOV	- EU_ALU
+   ----- ARITHMETIC INSTRUCTIONS -----
+   0x06		- ADD	- EU_ALU
+   0x07		- SUB	- EU_ALU
+   0x08		- MUL	- EU_MULDIV
+   0x09		- DIV	- EU_MULDIV
+   ----- LOGIC INSTRUCTIONS -----
+   0x0a		- AND	- EU_ALU
+   0x0b		- OR	- EU_ALU
+   0x0c		- NOR	- EU_ALU
+   0x0d		- NOT	- EU_ALU
+   0x0e		- XOR	- EU_ALU
+   */
+
+/* LDI and MOV use special ALU circuitry. LDI already contains the immediate to
+   be loaded so it may be extended and written back simply. MOV must simply
+   take the value of its source register and write it back to its destination
+   register. */
+
+/* Also important, DIMM16 and DXB type instructions must be handled specially
+   so that they do not end up waiting for unnecessary registers. */
+
+reg [3:0] execution_unit;
+reg [2:0] xclass;
+
+always @* begin
+	case (insn[31:24])
+		8'h00: begin
+			execution_unit = EU_MEM;
+			xclass = C_DXB;
+		end
+		8'h01: begin
+			execution_unit = EU_MEM;
+			xclass = C_XAB;
+		end
+		8'h02: begin
+			execution_unit = EU_ALU;
+			xclass = C_DIMM16;
+		end
+		8'h03: begin
+			execution_unit = EU_MEM;
+			xclass = C_XAX;
+		end
+		8'h04: begin
+			execution_unit = EU_MEM;
+			xclass = C_DXX;
+		end
+		8'h05: begin
+			execution_unit = EU_ALU;
+			xclass = C_DXB;
+		end
+		8'h06, 8'h07, 8'h0a, 8'h0b,
+		8'h0c, 8'h0e: begin
+			execution_unit = EU_ALU;
+			xclass = C_DAB;
+		end
+		8'h0d: begin
+			execution_unit = EU_ALU;
+			xclass = C_DXB;
+		end
+		8'h08, 8'h09: begin
+			execution_unit = EU_MULDIV;
+			xclass = C_DAB;
+		end
+		8'h0f: begin
+			execution_unit = EU_BRANCH;
+			xclass = C_XAB;
+		end
+		8'h10, 8'h12, 8'h14, 8'h16,
+		8'h18, 8'h1a, 8'h1c, 8'h1e,
+		8'h20: begin
+			execution_unit = EU_BRANCH;
+			xclass = C_XAX;
+		end
+		8'h11, 8'h13, 8'h15, 8'h17,
+		8'h19, 8'h1b, 8'h1d, 8'h1f,
+		8'h21: begin
+			execution_unit = EU_BRANCH;
+			xclass = C_IMM24;
+		end
+		default: begin
+			execution_unit = EU_NONE;
+			xclass = C_NONE;
+		end
+	endcase
+end
 
 register_renamer
 _register_renamer(
 	.clk (clk),
 	.rst (rst),
-	.rename (rename)
+	.rename (rename),
 	.nr_wb (nr_wb),
 	.nr_a (nr_a),
 	.nr_b (nr_b),
 	.tag_clear (commit_queue_retire[35:32]),
 	.tag_wb (new_tag_wb),
-	.tag_a (),
-	.tag_b ()
+	.tag_a (new_tag_a),
+	.tag_b (new_tag_b)
 );
 
 assign commit_queue_new_entry[35:32] = new_tag_wb;
@@ -304,7 +422,7 @@ _commit_queue(
 	.clk (clk),
 	.rst (rst),
 	.push (get_next_insn),
-	.next (),
+	.next (retire_next_commit),
 	.clear (),
 	.empty (),
 	.full (),
@@ -314,6 +432,98 @@ _commit_queue(
 	.out_entry (commit_queue_retire),
 	.out_value (retire_value)
 );
+
+/* Architectural registers. */
+
+reg [31:0] archregs [0:15];
+
+/* Decoded tag and value fields. */
+
+reg [5:0] decoded_tag_wb;
+reg [5:0] decoded_tag_a;
+reg [5:0] decoded_tag_b;
+reg [31:0] decoded_value_a;
+reg [31:0] decoded_value_b;
+
+/* Handle weird xclass stuff. */
+
+always @* begin
+	case (xclass)
+		C_DAB: begin
+			decoded_tag_wb = {1'b1, new_tag_wb};
+			decoded_tag_a = new_tag_a;
+			decoded_tag_b = new_tag_b;
+			decoded_value_a = new_tag_a[5] ? 0 : archregs[nr_a];
+			decoded_value_b = new_tag_b[5] ? 0 : archregs[nr_b];
+		end
+		C_DXB: begin
+			decoded_tag_wb = {1'b1, new_tag_wb};
+			decoded_tag_a = 0;
+			decoded_tag_b = new_tag_b;
+			decoded_value_a = 0;
+			decoded_value_b = new_tag_b[5] ? 0 : archregs[nr_b];
+		end
+		C_DXX: begin
+			decoded_tag_wb = {1'b1, new_tag_wb};
+			decoded_tag_a = 0;
+			decoded_tag_b = 0;
+			decoded_value_a = 0;
+			decoded_value_b = 0;
+		end
+		C_XAB: begin
+			decoded_tag_wb = 0;
+			decoded_tag_a = new_tag_a;
+			decoded_tag_b = new_tag_b;
+			decoded_value_a = new_tag_a[5] ? 0 : archregs[nr_a];
+			decoded_value_b = new_tag_b[5] ? 0 : archregs[nr_b];
+		end
+		C_XAX: begin
+			decoded_tag_wb = 0;
+			decoded_tag_a = new_tag_a;
+			decoded_tag_b = 0;
+			decoded_value_a = new_tag_a[5] ? 0 : archregs[nr_a];
+			decoded_value_b = 0;
+		end
+		C_DIMM16: begin
+			decoded_tag_wb = {1'b1, new_tag_wb};
+			decoded_tag_a = 0;
+			decoded_tag_b = 0;
+			decoded_value_a = 0;
+			decoded_value_b = insn[15:0];
+		end
+		C_IMM24: begin
+			decoded_tag_wb = 0;
+			decoded_tag_a = 0;
+			decoded_tag_b = 0;
+			decoded_value_a = 0;
+			decoded_value_b = insn[23:0];
+		end
+		default: begin
+			decoded_tag_wb = 0;
+			decoded_tag_a = 0;
+			decoded_tag_b = 0;
+			decoded_value_a = 0;
+			decoded_value_b = 0;
+		end
+	endcase
+end
+
+/* Buffer between predecode and execution stage. */
+
+/*reg [] dispatch_buffer;
+
+always @(posedge clk) begin
+	if (rst)
+		dispatch_buffer <= 0;
+	else begin
+		dispatch_buffer[] <= new_tag_wb;
+		dispatch_buffer[] <= new_tag_a;
+		dispatch_buffer[] <= new_tag_b;
+		dispatch_buffer[] <= insn;
+	end
+end*/
+
+
 
 endmodule
 
@@ -328,14 +538,30 @@ cpu3(
 wire clk = ~notclk;
 wire rst = ~notrst;
 
-register_renamer
-_register_renamer(
+reg [31:0] mem [0:1023];
+
+/* If I did all 32 bits, I'd need 4294967296 addresses... */
+/* TODO: Use multibyte loading. */
+
+wire [31:0] addr;
+wire [31:0] towrite;
+
+main
+_main(
 	.clk (clk),
 	.rst (rst),
-	.nr_wb (in[7:4]),
-	.nr_a (in[3:0]),
-	.tag_a (out[5:0]),
-	.st2 (out[7:6])
+	.in_mem (mem[addr]),
+	.out_addr (addr),
+	.out_mem (towrite)
 );
+
+/*always @(posedge clk) begin
+	if (rst) begin
+	
+	end
+	else if () begin
+		mem[addr] <= towrite;
+	end
+end*/
 
 endmodule
