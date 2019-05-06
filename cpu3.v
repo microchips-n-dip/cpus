@@ -2,24 +2,24 @@
 
 module
 pending_queue(
-	input clk,
-	input rst,
-	input push,
-	input next,
-	input clear,
-	output empty,
-	output full,
-	input [23:0] in_insn,
-	output [23:0] out_insn
+	input			clk,
+	input 			rst,
+	input 			push,
+	input 			next,
+	input 			clear,
+	output 			empty,
+	output			full,
+	input	[23:0]	in_insn,
+	output	[23:0]	out_insn
 );
 
-wire stop0;
-wire stop1;
+wire 			stop0;
+wire 			stop1;
 
-reg [23:0] insn = 16'hff00;
-reg [23:0] pending [0:7];
-reg [3:0] pending_head = 0;
-reg [3:0] pending_tail = 0;
+reg		[23:0]	insn = 16'hff00;
+reg		[23:0]	pending [0:7];
+reg		[3:0]	pending_head = 0;
+reg		[3:0]	pending_tail = 0;
 
 /* When clear is set, it enables both stops so nothing advanced and sets
    head to tail. */
@@ -60,28 +60,28 @@ endmodule
 
 module
 register_renamer(
-	input clk,
-	input rst,
-	input rename,
-	input [3:0] nr_wb,
-	input [3:0] nr_a,
-	input [3:0] nr_b,
-	input [4:0] tag_clear,
-	output [4:0] tag_wb,
-	output [5:0] tag_a,
-	output [5:0] tag_b,
-	output [1:0] st2
+	input			clk,
+	input			rst,
+	input			rename,
+	input	[3:0]	nr_wb,
+	input	[3:0]	nr_a,
+	input	[3:0]	nr_b,
+	input	[4:0]	tag_clear,
+	output	[4:0]	tag_wb,
+	output	[5:0]	tag_a,
+	output	[5:0]	tag_b,
+	output	[1:0]	st2
 );
 
-reg [3:0] nrs [0:31];
-reg [31:0] using;
-wire [31:0] use_next;
-wire [31:0] found_a;
-reg [4:0] _tag_a;
-wire [31:0] found_b;
-reg [4:0] _tag_b;
-wire [31:0] found_wb;
-reg [4:0] _tag_wb;
+reg		[3:0]	nrs			[0:31];
+reg		[31:0]	using;
+wire	[31:0]	use_next;
+wire	[31:0]	found_a;
+reg		[4:0]	_tag_a;
+wire	[31:0]	found_b;
+reg		[4:0]	_tag_b;
+wire	[31:0]	found_wb;
+reg		[4:0]	_tag_wb;
 
 integer j;
 
@@ -142,28 +142,28 @@ endmodule
 
 module
 commit_queue(
-	input clk,
-	input rst,
-	input push,
-	input next,
-	input clear,
-	output empty,
-	output full,
-	input [4:0] tag_wb,
-	input [31:0] wb_val,
-	input [35:0] in_entry,
-	output [35:0] out_entry,
-	output [31:0] out_value
+	input			clk,
+	input			rst,
+	input			push,
+	input			next,
+	input			clear,
+	output			empty,
+	output			full,
+	input	[4:0]	tag_wb,
+	input	[31:0]	wb_val,
+	input	[35:0]	in_entry,
+	output	[35:0]	out_entry,
+	output	[31:0]	out_value
 );
 
-wire stop0;
-wire stop1;
+wire			stop0;
+wire			stop1;
 
-reg [67:0] out_buf;
-reg [35:0] entries [0:31];
-reg [31:0] commit_vals [0:31];
-reg [4:0] commit_head = 0;
-reg [4:0] commit_tail = 0;
+reg		[67:0]	out_buf;
+reg		[35:0]	entries		[0:31];
+reg		[31:0]	commit_vals [0:31];
+reg		[4:0]	commit_head = 0;
+reg		[4:0]	commit_tail = 0;
 
 /* When clear is set, it enables both stops so nothing advanced and sets
    head to tail. */
@@ -218,11 +218,11 @@ endmodule
 
 module
 main(
-	input clk,
-	input rst,
-	input [31:0] in_mem,
-	output [31:0] out_addr,
-	output [31:0] out_mem
+	input			clk,
+	input			rst,
+	input	[31:0]	in_mem,
+	output	[31:0]	out_addr,
+	output	[31:0]	out_mem
 );
 
 /* Push a new instruction onto the pending queue. */
