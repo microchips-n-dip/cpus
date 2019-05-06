@@ -400,6 +400,9 @@ always @* begin
 	endcase
 end
 
+assign rename = (xclass == C_DAB) || (xclass == C_DXB) ||
+				(xclass == C_DXX) || (xclass == C_DIMM16);
+
 register_renamer
 _register_renamer(
 	.clk (clk),
@@ -513,20 +516,85 @@ end
 
 /* Buffer between predecode and execution stage. */
 
-/*reg [] dispatch_buffer;
+reg [46:0] dispatch_buffer;
 
 always @(posedge clk) begin
 	if (rst)
 		dispatch_buffer <= 0;
 	else begin
-		dispatch_buffer[] <= new_tag_wb;
-		dispatch_buffer[] <= new_tag_a;
-		dispatch_buffer[] <= new_tag_b;
-		dispatch_buffer[] <= insn;
+		dispatch_buffer[110:106] <= decoded_tag_wb;
+		dispatch_buffer[105:101] <= decoded_tag_a;
+		dispatch_buffer[100: 69] <= decoded_value_a;
+		dispatch_buffer[ 68: 64] <= decoded_tag_b;
+		dispatch_buffer[ 63: 32] <= decoded_value_b;
+		dispatch_buffer[ 31:  0] <= insn;
 	end
-end*/
+end
 
+/* EU_MEM. */
 
+wire [31:0] eu_mem_insn;
+wire [31:0] eu_mem_addr;
+wire [31:0] eu_mem_tostore;
+reg [31:0] eu_mem_wb;
+
+always @* begin
+	case (eu_mem_insn[31:24])
+		8'h00: begin
+			/* Take control of memory interface from fetch logic. */
+			out_addr <= eu_mem_addr;
+			out_mem <= 0;
+			eu_mem_wb <= in_mem;
+		end
+		8'h01: begin
+			/* Take control of memory interface from fetch logic. */
+			out_addr <= eu_mem_addr;
+			out_mem <= eu_mem_tostore;
+			eu_mem_wb <= 0;
+		end
+		default: begin
+			out_addr <= 0;
+			out_mem <= 0;
+			eu_mem_wb <= 0;
+		end
+	endcase
+end
+
+/* EU_ALU. */
+
+wire [31:0] eu_alu_insn;
+wire [31:0] eu_alu_a;
+wire [31:0] eu_alu_b;
+reg [31:0] eu_alu_wb;
+
+always @* begin
+	case (eu_alu_insn[31:24])
+		8'h02, 8'h05: eu_alu_wb <= eu_alu_b;
+		8'h06: eu_alu_wb <= eu_alu_a + eu_alu_b;
+		8'h07: eu_alu_wb <= eu_alu_a - eu_alu_b;
+		8'h0a: eu_alu_wb <= eu_alu_a & eu_alu_b;
+		8'h0b: eu_alu_wb <= eu_alu_a | eu_alu_b;
+		8'h0c: eu_alu_wb <= ~(eu_alu_a | eu_alu_b);
+		8'h0d: eu_alu_wb <= ~eu_alu_b;
+		8'h0e: eu_alu_wb <= eu_alu_a ^ eu_alu_b;
+		default: eu_alu_wb <= 0;
+	endcase
+end
+
+/* EU_MULDIV. */
+
+wire [31:0] eu_muldiv_insn;
+wire [31:0] eu_muldiv_a;
+wire [31:0] eu_muldiv_b;
+reg [63:0] eu_muldiv_wb;
+
+always @* begin
+	case (eu_muldiv_insn[31:24])
+		8'h08: eu_muldiv_wb <= eu_muldiv_a * eu_muldiv_b;
+		8'h09: eu_muldiv_wb <= eu_muldiv_a / eu_muldiv_b;
+		default: eu_muldiv_wb <= 0;
+	endcase
+end
 
 endmodule
 
@@ -568,3 +636,4 @@ _main(
 end*/
 
 endmodule
+
