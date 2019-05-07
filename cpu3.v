@@ -210,6 +210,65 @@ assign out_value = out_buf[31:0];
 
 endmodule
 
+/* Reservation station with three entries. */
+
+module
+reservation_station(
+	input			clk,
+	input			rst,
+	input	[5:0]	new_wb_tag,
+	input	[31:0]	new_insn,
+	input	[5:0]	new_tag_a,
+	input 	[31:0]	new_value_a,
+	input	[5:0]	new_tag_b,
+	input	[31:0]	new_value_b,
+	input	[4:0]	common_writeback_tag,
+	input	[31:0]	common_writeback_value,
+	output			none_free
+);
+
+reg		[2:0]	using;
+wire	[3:0]	use_next;
+reg 	[5:0]	wb_tags		[0:2];
+reg		[31:0]	insns		[0:2];
+reg 	[5:0]	qi_tags		[0:2];
+reg 	[31:0]	vi_values	[0:2];
+reg 	[5:0]	qj_tags		[0:2];
+reg 	[31:0]	vj_values	[0:2];
+
+genvar i;
+
+generate
+for (i = 0; i < 3; i = i + 1) begin : set_operand_values
+	assign use_next[i + 1] = using[i] && use_next[i];
+	always @(posedge clk) begin
+		if (rst)
+			using[i] <= 0;
+		else if (use_next[i])
+			using[i] <= use_next[i];
+		if (use_next[i] && !using[i]) begin
+			wb_tags[i] <= new_wb_tag;
+			insns[i] <= new_insn;
+			qi_tags[i] <= new_tag_a;
+			qj_tags[i] <= new_tag_b;
+			vi_values[i] <= new_value_a;
+			vj_values[i] <= new_value_b;
+		end
+		else if (using[i]) begin
+			if (common_writeback_tag == qi_tags[i][4:0])
+				vi_values[i] <= common_writeback_value;
+			if (common_writeback_tag == qj_tags[i][4:0])
+				vj_values[i] <= common_writeback_value;
+		end
+	end
+end
+endgenerate
+
+assign use_next[0] = 1'b1;
+assign none_free = use_next[3];
+
+endmodule
+
 /* All fetched instructions are placed on the pending queue. When an
    instruction is removed from the pending queue, it is assigned a renamed
    writeback register and an entry is made in the writeback ledger. It is also
@@ -400,8 +459,9 @@ always @* begin
 	endcase
 end
 
-assign rename = (xclass == C_DAB) || (xclass == C_DXB) ||
-				(xclass == C_DXX) || (xclass == C_DIMM16);
+assign rename = get_next_insn &&
+				((xclass == C_DAB) || (xclass == C_DXB) ||
+				 (xclass == C_DXX) || (xclass == C_DIMM16));
 
 register_renamer
 _register_renamer(
@@ -530,6 +590,10 @@ always @(posedge clk) begin
 		dispatch_buffer[ 31:  0] <= insn;
 	end
 end
+
+/* Managing reservation stations: Fairly simple mechanism, similar to renamer.
+   If no stations are free, stall everything above by disabling get_next_insn
+   and wait for some retires. */
 
 /* EU_MEM. */
 
