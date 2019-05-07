@@ -516,7 +516,7 @@ end
 
 /* Buffer between predecode and execution stage. */
 
-reg [46:0] dispatch_buffer;
+reg [110:0] dispatch_buffer;
 
 always @(posedge clk) begin
 	if (rst)
@@ -538,27 +538,33 @@ wire [31:0] eu_mem_addr;
 wire [31:0] eu_mem_tostore;
 reg [31:0] eu_mem_wb;
 
+reg [31:0] eu_mem_out_addr;
+reg [31:0] eu_mem_out_mem;
+
 always @* begin
 	case (eu_mem_insn[31:24])
 		8'h00: begin
 			/* Take control of memory interface from fetch logic. */
-			out_addr <= eu_mem_addr;
-			out_mem <= 0;
+			eu_mem_out_addr <= eu_mem_addr;
+			eu_mem_out_mem <= 0;
 			eu_mem_wb <= in_mem;
 		end
 		8'h01: begin
 			/* Take control of memory interface from fetch logic. */
-			out_addr <= eu_mem_addr;
-			out_mem <= eu_mem_tostore;
+			eu_mem_out_addr <= eu_mem_addr;
+			eu_mem_out_mem <= eu_mem_tostore;
 			eu_mem_wb <= 0;
 		end
 		default: begin
-			out_addr <= 0;
-			out_mem <= 0;
+			eu_mem_out_addr <= 0;
+			eu_mem_out_mem <= 0;
 			eu_mem_wb <= 0;
 		end
 	endcase
 end
+
+assign out_addr = eu_mem_out_addr;
+assign out_mem = eu_mem_out_mem;
 
 /* EU_ALU. */
 
@@ -636,4 +642,3 @@ _main(
 end*/
 
 endmodule
-
