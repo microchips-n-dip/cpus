@@ -66,6 +66,7 @@ register_renamer(
 	input	[3:0]	nr_wb,
 	input	[3:0]	nr_a,
 	input	[3:0]	nr_b,
+	input			clearing,
 	input	[4:0]	tag_clear,
 	output	[4:0]	tag_wb,
 	output	[5:0]	tag_a,
@@ -95,16 +96,17 @@ for (i = 0; i < 32; i = i + 1) begin : check_for_nrs
 end
 /* I really don't like this loop. */
 always @* begin
-	_tag_a = 0;
-	_tag_b = 0;
+	_tag_wb <= 0;
+	_tag_a <= 0;
+	_tag_b <= 0;
 	for (j = 0; j < 32; j = j + 1) begin
 		if (found_a[j])
-			_tag_a = j;
+			_tag_a <= j;
 		if (found_b[j])
-			_tag_b = j;
+			_tag_b <= j;
 		if (use_next[j] && !using[j] && !found_wb[j])
 			/* Return only the most recent writeback name. */
-			_tag_wb = j;
+			_tag_wb <= j;
 	end
 end
 /* Assign a new name to the writeback register. */
@@ -112,17 +114,17 @@ for (i = 0; i < 32; i = i + 1) begin : select_new_name
 	always @(posedge clk) begin
 		if (rst)
 			using[i] <= 0;
-		else if (tag_clear == i)
+		else if (clearing && tag_clear == i)
 			/* Mark this name as unused when the values are committed. */
 			using[i] <= 0;
-		else
+		else if (rename)
 			using[i] <= use_next[i];
 		if (use_next[i] && !using[i])
 			nrs[i] <= nr_wb;
 	end
 end
 for (i = 0; i < 31; i = i + 1) begin : propagate
-	assign use_next[i + 1] = using[i] & use_next[i] & rename;
+	assign use_next[i + 1] = using[i] && use_next[i];
 end
 endgenerate
 
@@ -160,6 +162,7 @@ wire			stop0;
 wire			stop1;
 
 reg		[68:0]	out_buf;
+reg		[31:0]	ready;
 reg		[36:0]	entries		[0:31];
 reg		[31:0]	commit_vals [0:31];
 reg		[4:0]	commit_head = 0;
@@ -178,7 +181,7 @@ always @(posedge clk) begin
 		out_buf <= 0;
 		commit_tail <= 0;
 	end
-	else if (next && !stop0) begin
+	else if (ready[commit_tail] && next && !stop0) begin
 		out_buf[68:32] <= entries[commit_tail];
 		out_buf[31:0] <= commit_vals[commit_tail];
 		commit_tail <= commit_tail + 1;
@@ -199,8 +202,14 @@ generate
 genvar i;
 for (i = 0; i < 32; i = i + 1) begin : save_commits_by_tag
 	always @(posedge clk) begin
-		if (entries[i][36:32] == tag_wb)
+		if (rst)
+			ready[i] <= 0;
+		else if ((i == commit_tail) && ready[i] && next)
+			ready[i] <= 0;
+		else if (entries[i][36:32] == tag_wb) begin
 			commit_vals[i] <= wb_val;
+			ready[i] <= 1;
+		end
 	end
 end
 endgenerate
@@ -249,11 +258,11 @@ genvar i;
 
 generate
 for (i = 0; i < 3; i = i + 1) begin : set_operand_values
-	assign use_next[i + 1] = using[i] && use_next[i] && new_incoming;
+	assign use_next[i + 1] = using[i] && use_next[i];
 	always @(posedge clk) begin
 		if (rst)
 			using[i] <= 0;
-		else if (use_next[i])
+		else if (use_next[i] && new_incoming)
 			using[i] <= use_next[i];
 		if (use_next[i] && !using[i]) begin
 			wb_tags[i] <= new_wb_tag;
@@ -264,6 +273,8 @@ for (i = 0; i < 3; i = i + 1) begin : set_operand_values
 			vj_values[i] <= new_value_b;
 			timestamps[i] <= new_timestamp;
 		end
+		else if (run[i])
+			using[i] <= 0;
 		else if (using[i]) begin
 			if (common_writeback_tag == qi_tags[i][4:0] && qi_tags[i][5]) begin
 				vi_values[i] <= common_writeback_value;
@@ -275,7 +286,7 @@ for (i = 0; i < 3; i = i + 1) begin : set_operand_values
 			end
 		end
 	end
-	assign ready[i] = !(qi_tags[i][5] || qj_tags[i][5]);
+	assign ready[i] = using[i] && !(qi_tags[i][5] || qj_tags[i][5]);
 end
 endgenerate
 
@@ -292,7 +303,7 @@ assign run[2] = ready[2] &&
 				((timestamps[2] < timestamps[0] || !ready[0]) &&
 				 (timestamps[2] < timestamps[1] || !ready[1]));
 
-assign next_tag_wb = run[0] ? wb_tags[0] :
+assign next_wb_tag = run[0] ? wb_tags[0] :
 					 run[1] ? wb_tags[1] :
 					 run[2] ? wb_tags[2] : 0;
 assign next_insn = run[0] ? insns[0] :
@@ -319,8 +330,20 @@ main(
 	input			rst,
 	input	[31:0]	in_mem,
 	output	[31:0]	out_addr,
-	output	[31:0]	out_mem
+	output	[31:0]	out_mem,
+	output	[7:0]	st8
 );
+
+/* Program counter logic. */
+
+reg [31:0] program_counter;
+
+always @(posedge clk) begin
+	if (rst)
+		program_counter <= 0;
+	else
+		program_counter <= program_counter + 1;
+end
 
 /* Push a new instruction onto the pending queue. */
 
@@ -514,6 +537,7 @@ _register_renamer(
 	.nr_wb (nr_wb),
 	.nr_a (nr_a),
 	.nr_b (nr_b),
+	.clearing (1'b0),
 	.tag_clear (commit_queue_retire[36:32]),
 	.tag_wb (new_tag_wb),
 	.tag_a (new_tag_a),
@@ -650,7 +674,7 @@ end
 
 /* EU_MEM. */
 
-wire eu_mem_incoming = dispatch_buffer[181:178] == 0;
+wire eu_mem_incoming = dispatch_buffer[181:178] == EU_MEM;
 wire [5:0] eu_mem_wb_tag;
 wire [31:0] eu_mem_insn;
 wire [31:0] eu_mem_addr;
@@ -703,12 +727,12 @@ always @* begin
 	endcase
 end
 
-assign out_addr = eu_mem_out_addr;
-assign out_mem = eu_mem_out_mem;
+//assign out_addr = eu_mem_out_addr;
+//assign out_mem = eu_mem_out_mem;
 
 /* EU_ALU. */
 
-wire eu_alu_incoming = dispatch_buffer[181:178] == 1;
+wire eu_alu_incoming = dispatch_buffer[181:178] == EU_ALU;
 wire [5:0] eu_alu_wb_tag;
 wire [31:0] eu_alu_insn;
 wire [31:0] eu_alu_a;
@@ -765,6 +789,15 @@ always @* begin
 	endcase
 end
 
+/* Temporary direct forwarding for tests. */
+
+assign push_new_insn = 1'b1;
+assign get_next_insn = 1'b1;
+assign out_addr = program_counter;
+assign writeback_tag = eu_alu_wb_tag[4:0];
+assign writeback_value = eu_alu_wb;
+assign st8 = eu_alu_wb;
+
 endmodule
 
 module
@@ -784,24 +817,30 @@ reg [31:0] mem [0:1023];
 /* TODO: Use multibyte loading. */
 
 wire [31:0] addr;
+wire [31:0] memread;
 wire [31:0] towrite;
 
 main
 _main(
 	.clk (clk),
 	.rst (rst),
-	.in_mem (mem[addr]),
+	.in_mem (memread),
 	.out_addr (addr),
-	.out_mem (towrite)
+	.out_mem (towrite),
+	.st8 (out)
 );
 
-/*always @(posedge clk) begin
+assign memread = mem[addr[9:0]];
+
+always @(posedge clk) begin
 	if (rst) begin
-	
+		mem[0] <= 31'h02000001;
+		mem[1] <= 31'h02000002;
+		mem[2] <= 31'h02000003;
 	end
-	else if () begin
-		mem[addr] <= towrite;
-	end
-end*/
+	//else if () begin
+	//	mem[addr] <= towrite;
+	//end
+end
 
 endmodule
