@@ -16,7 +16,7 @@ pending_queue(
 wire 			stop0;
 wire 			stop1;
 
-reg		[31:0]	insn;
+reg		[31:0]	insn = 31'h05000000;
 reg		[31:0]	pending [0:7];
 reg		[3:0]	pending_head = 0;
 reg		[3:0]	pending_tail = 0;
@@ -70,8 +70,7 @@ register_renamer(
 	input	[4:0]	tag_clear,
 	output	[4:0]	tag_wb,
 	output	[5:0]	tag_a,
-	output	[5:0]	tag_b,
-	output	[1:0]	st2
+	output	[5:0]	tag_b
 );
 
 reg		[3:0]	nrs			[0:31];
@@ -136,8 +135,6 @@ assign tag_b[4:0] = _tag_b;
 assign tag_b[5] = |(found_b);
 assign tag_wb = _tag_wb;
 
-assign st2 = using[1:0];
-
 endmodule
 
 /* The commit queue makes sure instructions are committed in order. */
@@ -151,11 +148,13 @@ commit_queue(
 	input			clear,
 	output			empty,
 	output			full,
+	input			committing,
 	input	[4:0]	tag_wb,
 	input	[31:0]	wb_val,
 	input	[36:0]	in_entry,
 	output	[36:0]	out_entry,
-	output	[31:0]	out_value
+	output	[31:0]	out_value,
+	output			ready_clear_tag
 );
 
 wire			stop0;
@@ -206,7 +205,7 @@ for (i = 0; i < 32; i = i + 1) begin : save_commits_by_tag
 			ready[i] <= 0;
 		else if ((i == commit_tail) && ready[i] && next)
 			ready[i] <= 0;
-		else if (entries[i][36:32] == tag_wb) begin
+		else if (committing && (entries[i][36:32] == tag_wb)) begin
 			commit_vals[i] <= wb_val;
 			ready[i] <= 1;
 		end
@@ -216,6 +215,7 @@ endgenerate
 
 assign out_entry = out_buf[67:32];
 assign out_value = out_buf[31:0];
+assign ready_clear_tag = ready[commit_tail];
 
 endmodule
 
@@ -384,6 +384,7 @@ wire [36:0] commit_queue_new_entry;
 
 /* value and tag for writeback from execution units. */
 
+wire committing;
 wire [4:0] writeback_tag;
 wire [31:0] writeback_value;
 
@@ -537,7 +538,7 @@ _register_renamer(
 	.nr_wb (nr_wb),
 	.nr_a (nr_a),
 	.nr_b (nr_b),
-	.clearing (1'b0),
+	.clearing (retire_next_commit),
 	.tag_clear (commit_queue_retire[36:32]),
 	.tag_wb (new_tag_wb),
 	.tag_a (new_tag_a),
@@ -552,15 +553,17 @@ _commit_queue(
 	.clk (clk),
 	.rst (rst),
 	.push (get_next_insn),
-	.next (retire_next_commit),
-	.clear (),
+	.next (1'b1),
+	.clear (1'b0),
 	.empty (),
 	.full (),
+	.committing (committing),
 	.tag_wb (writeback_tag),
 	.wb_val (writeback_value),
 	.in_entry (commit_queue_new_entry),
 	.out_entry (commit_queue_retire),
-	.out_value (retire_value)
+	.out_value (retire_value),
+	.ready_clear_tag (retire_next_commit)
 );
 
 /* Architectural registers. */
@@ -650,8 +653,13 @@ reg [63:0] timestamp;
 reg [181:0] dispatch_buffer;
 
 always @(posedge clk) begin
-	if (rst)
-		dispatch_buffer <= 0;
+	if (rst) begin
+		dispatch_buffer[181:178] <= EU_ALU;
+		dispatch_buffer[177:114] <= 0;
+		dispatch_buffer[113:108] <= 5'h10;
+		dispatch_buffer[107: 32] <= 0;
+		dispatch_buffer[ 31:  0] <= 31'h05000000;
+	end
 	else begin
 		dispatch_buffer[181:178] <= execution_unit;
 		dispatch_buffer[177:114] <= timestamp;
@@ -795,8 +803,9 @@ assign push_new_insn = 1'b1;
 assign get_next_insn = 1'b1;
 assign out_addr = program_counter;
 assign writeback_tag = eu_alu_wb_tag[4:0];
+assign committing = eu_mem_wb_tag[5] || eu_alu_wb_tag[5];
 assign writeback_value = eu_alu_wb;
-assign st8 = eu_alu_wb;
+assign st8 = retire_value;
 
 endmodule
 
@@ -835,8 +844,9 @@ assign memread = mem[addr[9:0]];
 always @(posedge clk) begin
 	if (rst) begin
 		mem[0] <= 31'h02000001;
-		mem[1] <= 31'h02000002;
-		mem[2] <= 31'h02000003;
+		mem[1] <= 31'h02050002;
+		mem[2] <= 31'h02060003;
+		mem[3] <= 31'h06010609;
 	end
 	//else if () begin
 	//	mem[addr] <= towrite;
