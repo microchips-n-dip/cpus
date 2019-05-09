@@ -203,8 +203,15 @@ for (i = 0; i < 32; i = i + 1) begin : save_commits_by_tag
 	always @(posedge clk) begin
 		if (rst)
 			ready[i] <= 0;
-		else if ((i == commit_tail) && ready[i] && next)
+		/* Disable ready whenever a new instruction is added to avoid possible
+		   premature ready signals. */
+		else if ((i == commit_head) && push && !stop1)
 			ready[i] <= 0;
+		/* Disable ready whenever instruction is retired. Handled in this loop
+		   because of register-always affinity. */
+		else if ((i == commit_tail) && ready[i] && next && !stop0)
+			ready[i] <= 0;
+		/* Store values by tag. */
 		else if (committing && (entries[i][36:32] == tag_wb)) begin
 			commit_vals[i] <= wb_val;
 			ready[i] <= 1;
@@ -400,7 +407,7 @@ _pending_queue(
 	.rst (rst),
 	.push (push_new_insn),
 	.next (get_next_insn),
-	.clear (),
+	.clear (1'b0),
 	.empty (),
 	.full (),
 	.in_insn (in_mem),
