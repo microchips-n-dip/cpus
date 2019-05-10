@@ -16,7 +16,6 @@ pending_queue(
 wire 			stop0;
 wire 			stop1;
 
-reg		[31:0]	insn = 31'h05000000;
 reg		[31:0]	pending [0:7];
 reg		[3:0]	pending_head = 0;
 reg		[3:0]	pending_tail = 0;
@@ -28,28 +27,23 @@ assign stop0 = (pending_head == pending_tail) | clear;
 assign stop1 = (pending_head + 1 == pending_tail) | clear;
 assign empty = stop0;
 assign full = stop1;
-assign out_insn = insn;
 
 always @(posedge clk) begin
-	if (rst) begin
-		insn <= 0;
+	if (rst)
 		pending_tail <= 0;
-	end
-	else if (next && !stop0) begin
-		insn <= pending[pending_tail];
+	else if (next && !stop0)
 		pending_tail <= pending_tail + 1;
-	end
-	if (rst) begin
+	if (rst)
 		pending_head <= 0;
-	end
 	else if (push && !stop1) begin
 		pending[pending_head] <= in_insn;
 		pending_head <= pending_head + 1;
 	end
-	if (clear) begin
+	if (clear)
 		pending_head <= pending_tail;
-	end
 end
+
+assign out_insn = pending[pending_tail];
 
 endmodule
 
@@ -137,7 +131,10 @@ assign tag_wb = _tag_wb;
 
 endmodule
 
-/* The commit queue makes sure instructions are committed in order. */
+/* The commit queue makes sure instructions are committed in order. We
+   provisionally assume that all instructions fetched must also be preordered
+   because even if they have no writeback value, it is possible that the
+   instruction itself has an effect during retirement. */
 
 module
 commit_queue(
@@ -149,20 +146,22 @@ commit_queue(
 	output			empty,
 	output			full,
 	input			committing,
-	input	[4:0]	tag_wb,
-	input	[31:0]	wb_val,
-	input	[36:0]	in_entry,
-	output	[36:0]	out_entry,
-	output	[31:0]	out_value,
-	output			ready_clear_tag
+	input	[5:0]	new_tag_wb,
+	input	[31:0]	new_insn,
+	input	[4:0]	common_writeback_tag,
+	input	[31:0]	common_writeback_value,
+	output	[5:0]	retire_tag,
+	output	[31:0]	retire_insn,
+	output	[31:0]	retire_value,
+	output			tag_clear_en
 );
 
 wire			stop0;
 wire			stop1;
 
-reg		[68:0]	out_buf;
-reg		[31:0]	ready;
-reg		[36:0]	entries		[0:31];
+reg		[31:0]	waiting;
+reg		[5:0]	tags		[0:31];
+reg		[31:0]	entries		[0:31];
 reg		[31:0]	commit_vals [0:31];
 reg		[4:0]	commit_head = 0;
 reg		[4:0]	commit_tail = 0;
@@ -176,53 +175,43 @@ assign empty = stop0;
 assign full = stop1;
 
 always @(posedge clk) begin
-	if (rst) begin
-		out_buf <= 0;
+	if (rst)
 		commit_tail <= 0;
-	end
-	else if (ready[commit_tail] && next && !stop0) begin
-		out_buf[68:32] <= entries[commit_tail];
-		out_buf[31:0] <= commit_vals[commit_tail];
+	else if (!waiting[commit_tail] && next && !stop0)
 		commit_tail <= commit_tail + 1;
-	end
-	if (rst) begin
+	if (rst)
 		commit_head <= 0;
-	end
 	else if (push && !stop1) begin
-		entries[commit_head] <= in_entry;
+		tags[commit_head] <= new_tag_wb;
+		entries[commit_head] <= new_insn;
 		commit_head <= commit_head + 1;
 	end
-	if (clear) begin
+	if (clear)
 		commit_head <= commit_tail;
-	end
 end
 
 generate
 genvar i;
-for (i = 0; i < 32; i = i + 1) begin : save_commits_by_tag
+for (i = 0; i < 32; i = i + 1) begin : update_waiting_status
 	always @(posedge clk) begin
-		if (rst)
-			ready[i] <= 0;
-		/* Disable ready whenever a new instruction is added to avoid possible
-		   premature ready signals. */
-		else if ((i == commit_head) && push && !stop1)
-			ready[i] <= 0;
-		/* Disable ready whenever instruction is retired. Handled in this loop
-		   because of register-always affinity. */
-		else if ((i == commit_tail) && ready[i] && next && !stop0)
-			ready[i] <= 0;
+		/* Prepare waiting signal based on writeback tag use status. If a tag
+		   is not in use, then there's no need to wait for it. */
+		if ((i == commit_head) && push && !stop1)
+			waiting[i] <= new_tag_wb[5];
 		/* Store values by tag. */
-		else if (committing && (entries[i][36:32] == tag_wb)) begin
-			commit_vals[i] <= wb_val;
-			ready[i] <= 1;
+		else if (committing && (tags[i][4:0] == common_writeback_tag)) begin
+			commit_vals[i] <= common_writeback_value;
+			waiting[i] <= 0;
 		end
 	end
 end
 endgenerate
 
-assign out_entry = out_buf[67:32];
-assign out_value = out_buf[31:0];
-assign ready_clear_tag = ready[commit_tail];
+assign retire_tag = tags[commit_tail];
+assign retire_insn = entries[commit_tail];
+assign retire_value = commit_vals[commit_tail];
+/* In effect, signal to do the retirement. */
+assign tag_clear_en = !waiting[commit_tail];
 
 endmodule
 
@@ -246,6 +235,7 @@ reservation_station(
 	output	[31:0]	next_value_b,
 	input	[4:0]	common_writeback_tag,
 	input	[31:0]	common_writeback_value,
+	output			running,
 	output			none_free
 );
 
@@ -309,6 +299,8 @@ assign run[1] = ready[1] &&
 assign run[2] = ready[2] &&
 				((timestamps[2] < timestamps[0] || !ready[0]) &&
 				 (timestamps[2] < timestamps[1] || !ready[1]));
+
+assign running = |run;
 
 assign next_wb_tag = run[0] ? wb_tags[0] :
 					 run[1] ? wb_tags[1] :
@@ -385,10 +377,6 @@ wire [4:0] new_tag_wb;
 wire [5:0] new_tag_a;
 wire [5:0] new_tag_b;
 
-/* New entry to the commit queue. */
-
-wire [36:0] commit_queue_new_entry;
-
 /* value and tag for writeback from execution units. */
 
 wire committing;
@@ -398,7 +386,8 @@ wire [31:0] writeback_value;
 /* Next entry in the commit queue to retire. */
 
 wire retire_next_commit;
-wire [36:0] commit_queue_retire;
+wire [5:0] retire_tag;
+wire [31:0] retire_insn;
 wire [31:0] retire_value;
 
 pending_queue
@@ -546,31 +535,10 @@ _register_renamer(
 	.nr_a (nr_a),
 	.nr_b (nr_b),
 	.clearing (retire_next_commit),
-	.tag_clear (commit_queue_retire[36:32]),
+	.tag_clear (retire_tag),
 	.tag_wb (new_tag_wb),
 	.tag_a (new_tag_a),
 	.tag_b (new_tag_b)
-);
-
-assign commit_queue_new_entry[36:32] = new_tag_wb;
-assign commit_queue_new_entry[31:0] = insn;
-
-commit_queue
-_commit_queue(
-	.clk (clk),
-	.rst (rst),
-	.push (get_next_insn),
-	.next (1'b1),
-	.clear (1'b0),
-	.empty (),
-	.full (),
-	.committing (committing),
-	.tag_wb (writeback_tag),
-	.wb_val (writeback_value),
-	.in_entry (commit_queue_new_entry),
-	.out_entry (commit_queue_retire),
-	.out_value (retire_value),
-	.ready_clear_tag (retire_next_commit)
 );
 
 /* Architectural registers. */
@@ -651,6 +619,26 @@ always @* begin
 	endcase
 end
 
+commit_queue
+_commit_queue(
+	.clk (clk),
+	.rst (rst),
+	.push (get_next_insn),
+	.next (1'b1),
+	.clear (1'b0),
+	.empty (),
+	.full (),
+	.committing (committing),
+	.new_tag_wb (decoded_tag_wb),
+	.new_insn (insn),
+	.common_writeback_tag (writeback_tag),
+	.common_writeback_value (writeback_value),
+	.retire_tag (retire_tag),
+	.retire_insn (retire_insn),
+	.retire_value (retire_value),
+	.tag_clear_en (retire_next_commit)
+);
+
 /* Timestamp counter for counting instruction timestamps. */
 
 reg [63:0] timestamp;
@@ -690,6 +678,7 @@ end
 /* EU_MEM. */
 
 wire eu_mem_incoming = dispatch_buffer[181:178] == EU_MEM;
+wire eu_mem_running;
 wire [5:0] eu_mem_wb_tag;
 wire [31:0] eu_mem_insn;
 wire [31:0] eu_mem_addr;
@@ -717,6 +706,7 @@ eu_mem_reservation_station(
 	.next_value_b (eu_mem_addr),
 	.common_writeback_tag (writeback_tag),
 	.common_writeback_value (writeback_value),
+	.running (eu_mem_running),
 	.none_free (none_free[0])
 );
 
@@ -748,6 +738,7 @@ end
 /* EU_ALU. */
 
 wire eu_alu_incoming = dispatch_buffer[181:178] == EU_ALU;
+wire eu_alu_running;
 wire [5:0] eu_alu_wb_tag;
 wire [31:0] eu_alu_insn;
 wire [31:0] eu_alu_a;
@@ -772,6 +763,7 @@ eu_alu_reservation_station(
 	.next_value_b (eu_alu_b),
 	.common_writeback_tag (writeback_tag),
 	.common_writeback_value (writeback_value),
+	.running (eu_alu_running),
 	.none_free (none_free[1])
 );
 
@@ -818,14 +810,16 @@ endmodule
 
 module
 cpu3(
-	input notclk,
-	input notrst,
+//	input notclk,
+//	input notrst,
 	input [7:0] in,
 	output [7:0] out
 );
 
-wire clk = ~notclk;
-wire rst = ~notrst;
+//wire clk = ~notclk;
+//wire rst = ~notrst;
+
+reg clk, rst;
 
 reg [31:0] mem [0:1023];
 
