@@ -66,9 +66,11 @@ register_renamer(
 	input	[3:0]	nr_b,
 	output	[15:0]	tag_wb,
 	output	[15:0]	tag_a,
+	output			tag_a_active,
 	output	[15:0]	tag_b,
+	output			tag_b_active,
 	input			clear_en,
-	input	[15:0]	clear_tag
+	input	[3:0]	nr_clear
 );
 
 reg		[15:0]	counter;
@@ -88,7 +90,9 @@ end
 
 assign tag_wb = counter;
 assign tag_a = tag_map[nr_a];
+assign tag_a_active = active[nr_a];
 assign tag_b = tag_map[nr_b];
+assign tag_b_active = active[nr_b];
 
 /* Keep track of which registers have active tags and handle clearing them. */
 
@@ -101,7 +105,8 @@ for (i = 0; i < 16; i = i + 1) begin : track_active_tags
 			active[i] <= 0;
 		else if (rename && (i == nr_wb))
 			active[i] <= 1;
-		else if (clear_en && (tag_map[i] == clear_tag))
+		/* Replace clear_tag with nr_wb from retire_insn. */
+		else if (clear_en && (i == nr_clear))
 			active[i] <= 0;
 	end
 end
@@ -143,8 +148,7 @@ commit_queue_location(
 	input		[15:0]	base_tag,
 	input		[15:0]	operand_tag,
 	output reg	[4:0]	location,
-	output reg			exists,
-	output				in_order
+	output reg			exists
 );
 
 wire			pt = base_tag[15];
@@ -154,30 +158,15 @@ wire	[14:0]	vo = operand_tag[14:0];
 
 reg		[14:0]	offsetof;
 
-tag_ordering
-_in_order(
-	.tag_a (base_tag),
-	.tag_b (operand_tag),
-	.ordered (in_order)
-);
-
 always @* begin
-	/* The operand tag has already been committed. */
-	if (!in_order) begin
-		offsetof <= 0;
-		location <= 0;
-		exists <= 0;
-	end
-	else begin
-		/* Normal case, no rollover. */
-		if (!(pt ^ po))
-			offsetof <= vo - vt;
-		/* Rollover occured, diff = 0xffff - vt + vo. */
-		else
-			offsetof <= vo + (16'hffff - vt);
-		location <= tail + offsetof[4:0];
-		exists <= location < head;
-	end
+	/* Normal case, no rollover. */
+	if (!(pt ^ po))
+		offsetof <= vo - vt;
+	/* Rollover occured, diff = 0xffff - vt + vo. */
+	else
+		offsetof <= vo + (16'hffff - vt);
+	location <= tail + offsetof[4:0];
+	exists <= location < head;
 end
 
 endmodule
@@ -202,11 +191,9 @@ commit_queue(
 	input	[15:0]	operand_tag_a,
 	output	[31:0]	operand_a,
 	output			operand_a_ready,
-	output			operand_a_committed,
 	input	[15:0]	operand_tag_b,
 	output	[31:0]	operand_b,
 	output			operand_b_ready,
-	output			operand_b_committed,
 	input	[15:0]	common_writeback_tag,
 	input	[31:0]	common_writeback_value,
 	output	[15:0]	retire_tag,
@@ -229,10 +216,8 @@ wire	[15:0]	oldest_tag;
 /* Absolute locations of tags in the queue. This is a cyclic queue after all. */
 wire	[4:0]	absolute_wb;
 wire			exists_a;
-wire			in_order_a;
 wire	[4:0]	absolute_a;
 wire			exists_b;
-wire			in_order_b;
 wire	[4:0]	absolute_b;
 
 /* When clear is set, it enables both stops so nothing advanced and sets
@@ -270,9 +255,7 @@ _find_wb(
 	.operand_tag (common_writeback_tag),
 	.location (absolute_wb),
 	/* Should always exist, otherwise something is seriously wrong. */
-	.exists (),
-	/* As above, should always be in order. */
-	.in_order ()
+	.exists ()
 );
 
 commit_queue_location
@@ -282,11 +265,8 @@ _find_a(
 	.base_tag (oldest_tag),
 	.operand_tag (operand_tag_a),
 	.location (absolute_a),
-	.exists (exists_a),
-	.in_order (in_order_a)
+	.exists (exists_a)
 );
-
-assign operand_a_committed = !in_order_a;
 
 commit_queue_location
 _find_b(
@@ -295,11 +275,8 @@ _find_b(
 	.base_tag (oldest_tag),
 	.operand_tag (operand_tag_b),
 	.location (absolute_b),
-	.exists (exists_b),
-	.in_order (in_order_b)
+	.exists (exists_b)
 );
-
-assign operand_b_committed = !in_order_b;
 
 generate
 genvar i;
@@ -657,6 +634,9 @@ assign rename = get_next_insn; /* &&
 				((xclass == C_DAB) || (xclass == C_DXB) ||
 				 (xclass == C_DXX) || (xclass == C_DIMM16));*/
 
+wire tag_a_active;
+wire tag_b_active;
+
 register_renamer
 _register_renamer(
 	.clk (clk),
@@ -667,9 +647,11 @@ _register_renamer(
 	.nr_b (nr_b),
 	.tag_wb (new_tag_wb),
 	.tag_a (new_tag_a),
+	.tag_a_active (tag_a_active),
 	.tag_b (new_tag_b),
+	.tag_b_active (tag_b_active),
 	.clear_en (retire_next_commit),
-	.clear_tag (retire_tag)
+	.nr_clear (retire_insn[19:16])
 );
 
 /* Architectural registers. */
@@ -698,11 +680,9 @@ _commit_queue(
 	.operand_tag_a (new_tag_a),
 	.operand_a (rob_operand_a),
 	.operand_a_ready (rob_a_ready),
-	.operand_a_committed (rob_a_committed),
 	.operand_tag_b (new_tag_b),
 	.operand_b (rob_operand_b),
 	.operand_b_ready (rob_b_ready),
-	.operand_b_committed (rob_b_committed),
 	.common_writeback_tag (writeback_tag),
 	.common_writeback_value (writeback_value),
 	.retire_tag (retire_tag),
@@ -722,7 +702,7 @@ reg [31:0] operand_b;
 reg operand_b_waiting;
 
 always @* begin
-	if (rob_a_committed) begin
+	if (!tag_a_active) begin
 		operand_a <= archregs[nr_a];
 		operand_a_waiting <= 0;
 	end
@@ -742,7 +722,7 @@ always @* begin
 		operand_b <= insn[23:0];
 		operand_b_waiting <= 0;
 	end
-	else if (rob_b_committed) begin
+	else if (!tag_b_active) begin
 		operand_b <= archregs[nr_b];
 		operand_b_waiting <= 0;
 	end
