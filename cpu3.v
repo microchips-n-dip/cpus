@@ -33,8 +33,10 @@ always @(posedge clk) begin
 		pending_tail <= 0;
 	else if (next && !stop0)
 		pending_tail <= pending_tail + 1;
-	if (rst)
+	if (rst) begin
 		pending_head <= 0;
+		pending[0] <= 31'h02000000;
+	end
 	else if (push && !stop1) begin
 		pending[pending_head] <= in_insn;
 		pending_head <= pending_head + 1;
@@ -52,82 +54,131 @@ endmodule
    to always generate new names, so rename explicitly indicates whether an
    instruction writes back. */
 
+/* New tag and rename system. */
+
 module
 register_renamer(
 	input			clk,
 	input			rst,
-	input			rename,
+	input			rename, /* Should rename all instructions. */
 	input	[3:0]	nr_wb,
 	input	[3:0]	nr_a,
 	input	[3:0]	nr_b,
-	input			clearing,
-	input	[4:0]	tag_clear,
-	output	[4:0]	tag_wb,
-	output	[5:0]	tag_a,
-	output	[5:0]	tag_b
+	output	[15:0]	tag_wb,
+	output	[15:0]	tag_a,
+	output	[15:0]	tag_b,
+	input			clear_en,
+	input	[15:0]	clear_tag
 );
 
-reg		[3:0]	nrs			[0:31];
-reg		[31:0]	using;
-wire	[31:0]	use_next;
-wire	[31:0]	found_a;
-reg		[4:0]	_tag_a;
-wire	[31:0]	found_b;
-reg		[4:0]	_tag_b;
-wire	[31:0]	found_wb;
-reg		[4:0]	_tag_wb;
+reg		[15:0]	counter;
+reg		[15:0]	tag_map	[0:15];
+reg		[15:0]	active; /* A register has an active tag. */
 
-integer j;
+/* Allocate tags. */
+
+always @(posedge clk) begin
+	if (rst)
+		counter <= 0;
+	else if (rename) begin
+		tag_map[nr_wb] <= counter;
+		counter <= counter + 1;
+	end
+end
+
+assign tag_wb = counter;
+assign tag_a = tag_map[nr_a];
+assign tag_b = tag_map[nr_b];
+
+/* Keep track of which registers have active tags and handle clearing them. */
+
+genvar i;
 
 generate
-genvar i;
-/* Check whether nr_a and nr_b are renamed. */
-for (i = 0; i < 32; i = i + 1) begin : check_for_nrs
-	assign found_wb[i] = (nr_wb == nrs[i]) && using[i];
-	assign found_a[i] = (nr_a == nrs[i]) && using[i];
-	assign found_b[i] = (nr_b == nrs[i]) && using[i];
-end
-/* I really don't like this loop. */
-always @* begin
-	_tag_wb <= 0;
-	_tag_a <= 0;
-	_tag_b <= 0;
-	for (j = 0; j < 32; j = j + 1) begin
-		if (found_a[j])
-			_tag_a <= j;
-		if (found_b[j])
-			_tag_b <= j;
-		if (use_next[j] && !using[j] && !found_wb[j])
-			/* Return only the most recent writeback name. */
-			_tag_wb <= j;
-	end
-end
-/* Assign a new name to the writeback register. */
-for (i = 0; i < 32; i = i + 1) begin : select_new_name
+for (i = 0; i < 16; i = i + 1) begin : track_active_tags
 	always @(posedge clk) begin
 		if (rst)
-			using[i] <= 0;
-		else if (clearing && tag_clear == i)
-			/* Mark this name as unused when the values are committed. */
-			using[i] <= 0;
-		else if (rename)
-			using[i] <= use_next[i];
-		if (use_next[i] && !using[i])
-			nrs[i] <= nr_wb;
+			active[i] <= 0;
+		else if (rename && (i == nr_wb))
+			active[i] <= 1;
+		else if (clear_en && (tag_map[i] == clear_tag))
+			active[i] <= 0;
 	end
-end
-for (i = 0; i < 31; i = i + 1) begin : propagate
-	assign use_next[i + 1] = using[i] && use_next[i];
 end
 endgenerate
 
-assign use_next[0] = 1'b1;
+endmodule
 
-assign tag_a[4:0] = _tag_a;
-assign tag_a[5] = |(found_a);
-assign tag_b[4:0] = _tag_b;
-assign tag_b[5] = |(found_b);
-assign tag_wb = _tag_wb;
+/* Detect proper ordering of tags. Because the ROB only has 32 entries and tags
+   are 15-bit numbers with a 16th rename phase parity bit, all that is necessary
+   to verify that tag_a <= tag_b is that tag_a's value is greater than that of
+   tag_b, and the parity bits aren't the same. The significantly smaller number
+   of ROB entries ensures no value collisions. */
+
+module
+tag_ordering(
+	input	[15:0]	tag_a,
+	input	[15:0]	tag_b,
+	output			ordered
+);
+
+wire parity_a;
+wire parity_b;
+
+assign parity_a = tag_a[15];
+assign parity_b = tag_b[15];
+assign ordered =
+	(!(parity_a ^ parity_b) && (tag_a[14:0] <= tag_b[14:0])) ||
+	((parity_a ^ parity_b) && (tag_b[14:0] <= tag_a[14:0]));
+
+endmodule
+
+/* Logic for determining the existence and location of a tag in the commit
+   queue. */
+
+module
+commit_queue_location(
+	input		[4:0]	head,
+	input		[4:0]	tail,
+	input		[15:0]	base_tag,
+	input		[15:0]	operand_tag,
+	output reg	[4:0]	location,
+	output reg			exists,
+	output				in_order
+);
+
+wire			pt = base_tag[15];
+wire	[14:0]	vt = base_tag[14:0];
+wire			po = operand_tag[15];
+wire	[14:0]	vo = operand_tag[14:0];
+
+reg		[14:0]	offsetof;
+
+tag_ordering
+_in_order(
+	.tag_a (base_tag),
+	.tag_b (operand_tag),
+	.ordered (in_order)
+);
+
+always @* begin
+	/* The operand tag has already been committed. */
+	if (!in_order) begin
+		offsetof <= 0;
+		location <= 0;
+		exists <= 0;
+	end
+	else begin
+		/* Normal case, no rollover. */
+		if (!(pt ^ po))
+			offsetof <= vo - vt;
+		/* Rollover occured, diff = 0xffff - vt + vo. */
+		else
+			offsetof <= vo + (16'hffff - vt);
+		location <= tail + offsetof[4:0];
+		exists <= location < head;
+	end
+end
 
 endmodule
 
@@ -146,11 +197,19 @@ commit_queue(
 	output			empty,
 	output			full,
 	input			committing,
-	input	[5:0]	new_tag_wb,
+	input	[15:0]	new_tag_wb,
 	input	[31:0]	new_insn,
-	input	[4:0]	common_writeback_tag,
+	input	[15:0]	operand_tag_a,
+	output	[31:0]	operand_a,
+	output			operand_a_ready,
+	output			operand_a_committed,
+	input	[15:0]	operand_tag_b,
+	output	[31:0]	operand_b,
+	output			operand_b_ready,
+	output			operand_b_committed,
+	input	[15:0]	common_writeback_tag,
 	input	[31:0]	common_writeback_value,
-	output	[5:0]	retire_tag,
+	output	[15:0]	retire_tag,
 	output	[31:0]	retire_insn,
 	output	[31:0]	retire_value,
 	output			tag_clear_en
@@ -160,11 +219,21 @@ wire			stop0;
 wire			stop1;
 
 reg		[31:0]	waiting;
-reg		[5:0]	tags		[0:31];
+reg		[15:0]	tags		[0:31];
 reg		[31:0]	entries		[0:31];
 reg		[31:0]	commit_vals [0:31];
 reg		[4:0]	commit_head = 0;
 reg		[4:0]	commit_tail = 0;
+
+wire	[15:0]	oldest_tag;
+/* Absolute locations of tags in the queue. This is a cyclic queue after all. */
+wire	[4:0]	absolute_wb;
+wire			exists_a;
+wire			in_order_a;
+wire	[4:0]	absolute_a;
+wire			exists_b;
+wire			in_order_b;
+wire	[4:0]	absolute_b;
 
 /* When clear is set, it enables both stops so nothing advanced and sets
    head to tail. */
@@ -190,16 +259,59 @@ always @(posedge clk) begin
 		commit_head <= commit_tail;
 end
 
+/* Compute the offsets of tags withing the queue. */
+assign oldest_tag = tags[commit_tail];
+
+commit_queue_location
+_find_wb(
+	.head (commit_head),
+	.tail (commit_tail),
+	.base_tag (oldest_tag),
+	.operand_tag (common_writeback_tag),
+	.location (absolute_wb),
+	/* Should always exist, otherwise something is seriously wrong. */
+	.exists (),
+	/* As above, should always be in order. */
+	.in_order ()
+);
+
+commit_queue_location
+_find_a(
+	.head (commit_head),
+	.tail (commit_tail),
+	.base_tag (oldest_tag),
+	.operand_tag (operand_tag_a),
+	.location (absolute_a),
+	.exists (exists_a),
+	.in_order (in_order_a)
+);
+
+assign operand_a_committed = !in_order_a;
+
+commit_queue_location
+_find_b(
+	.head (commit_head),
+	.tail (commit_tail),
+	.base_tag (oldest_tag),
+	.operand_tag (operand_tag_b),
+	.location (absolute_b),
+	.exists (exists_b),
+	.in_order (in_order_b)
+);
+
+assign operand_b_committed = !in_order_b;
+
 generate
 genvar i;
 for (i = 0; i < 32; i = i + 1) begin : update_waiting_status
 	always @(posedge clk) begin
 		/* Prepare waiting signal based on writeback tag use status. If a tag
 		   is not in use, then there's no need to wait for it. */
+		/* Actually I think I still need to wait for it. */
 		if ((i == commit_head) && push && !stop1)
-			waiting[i] <= new_tag_wb[5];
+			waiting[i] <= 1;
 		/* Store values by tag. */
-		else if (committing && (tags[i][4:0] == common_writeback_tag)) begin
+		else if (committing && (absolute_wb == i)) begin
 			commit_vals[i] <= common_writeback_value;
 			waiting[i] <= 0;
 		end
@@ -207,11 +319,18 @@ for (i = 0; i < 32; i = i + 1) begin : update_waiting_status
 end
 endgenerate
 
+/* Output any operands. We'll have to manage proper detection of any operands
+   though, so that the RSes know whether they need to wait. */
+assign operand_a = commit_vals[absolute_a];
+assign operand_a_ready = exists_a && !waiting[absolute_a];
+assign operand_b = commit_vals[absolute_b];
+assign operand_b_ready = exists_b && !waiting[absolute_b];
+
 assign retire_tag = tags[commit_tail];
 assign retire_insn = entries[commit_tail];
 assign retire_value = commit_vals[commit_tail];
 /* In effect, signal to do the retirement. */
-assign tag_clear_en = !waiting[commit_tail];
+assign tag_clear_en = !waiting[commit_tail] && !stop0;
 
 endmodule
 
@@ -222,18 +341,19 @@ reservation_station(
 	input			clk,
 	input			rst,
 	input			new_incoming,
-	input	[5:0]	new_wb_tag,
+	input	[15:0]	new_wb_tag,
 	input	[31:0]	new_insn,
-	input	[5:0]	new_tag_a,
+	input			waitfor_a,
+	input	[15:0]	new_tag_a,
 	input 	[31:0]	new_value_a,
-	input	[5:0]	new_tag_b,
+	input			waitfor_b,
+	input	[15:0]	new_tag_b,
 	input	[31:0]	new_value_b,
-	input	[63:0]	new_timestamp,
-	output	[5:0]	next_wb_tag,
+	output	[15:0]	next_wb_tag,
 	output	[31:0]	next_insn,
 	output	[31:0]	next_value_a,
 	output	[31:0]	next_value_b,
-	input	[4:0]	common_writeback_tag,
+	input	[15:0]	common_writeback_tag,
 	input	[31:0]	common_writeback_value,
 	output			running,
 	output			none_free
@@ -241,15 +361,22 @@ reservation_station(
 
 reg		[2:0]	using;
 wire	[3:0]	use_next;
-reg 	[5:0]	wb_tags		[0:2];
+reg 	[15:0]	wb_tags		[0:2];
 reg		[31:0]	insns		[0:2];
-reg 	[5:0]	qi_tags		[0:2];
+reg		[2:0]	waiting_0;
+reg 	[15:0]	qi_tags		[0:2];
 reg 	[31:0]	vi_values	[0:2];
-reg 	[5:0]	qj_tags		[0:2];
+reg		[2:0]	waiting_1;
+reg 	[15:0]	qj_tags		[0:2];
 reg 	[31:0]	vj_values	[0:2];
-reg		[63:0]	timestamps	[0:2];
 wire	[2:0]	ready;
 wire	[2:0]	run;
+
+/* Special wires for tag order checking. */
+
+wire tso01, tso02;
+wire tso10, tso12;
+wire tso20, tso21;
 
 genvar i;
 
@@ -264,41 +391,45 @@ for (i = 0; i < 3; i = i + 1) begin : set_operand_values
 		if (use_next[i] && !using[i]) begin
 			wb_tags[i] <= new_wb_tag;
 			insns[i] <= new_insn;
+			waiting_0[i] <= waitfor_a;
+			waiting_1[i] <= waitfor_b;
 			qi_tags[i] <= new_tag_a;
 			qj_tags[i] <= new_tag_b;
 			vi_values[i] <= new_value_a;
 			vj_values[i] <= new_value_b;
-			timestamps[i] <= new_timestamp;
 		end
 		else if (run[i])
 			using[i] <= 0;
 		else if (using[i]) begin
-			if (common_writeback_tag == qi_tags[i][4:0] && qi_tags[i][5]) begin
+			if (common_writeback_tag == qi_tags[i] && waiting_0[i]) begin
 				vi_values[i] <= common_writeback_value;
-				qi_tags[i][5] <= 0;
+				waiting_0[i] <= 0;
 			end
-			if (common_writeback_tag == qj_tags[i][4:0] && qj_tags[i][5]) begin
+			if (common_writeback_tag == qj_tags[i] && waiting_1[i]) begin
 				vj_values[i] <= common_writeback_value;
-				qj_tags[i][5] <= 0;
+				waiting_1[i] <= 0;
 			end
 		end
 	end
-	assign ready[i] = using[i] && !(qi_tags[i][5] || qj_tags[i][5]);
+	assign ready[i] = using[i] && !(waiting_0[i] || waiting_1[i]);
 end
 endgenerate
 
 assign use_next[0] = 1'b1;
 assign none_free = use_next[3];
 
-assign run[0] = ready[0] &&
-				((timestamps[0] < timestamps[1] || !ready[1]) &&
-				 (timestamps[0] < timestamps[2] || !ready[2]));
-assign run[1] = ready[1] &&
-				((timestamps[1] < timestamps[0] || !ready[0]) &&
-				 (timestamps[1] < timestamps[2] || !ready[2]));
-assign run[2] = ready[2] &&
-				((timestamps[2] < timestamps[0] || !ready[0]) &&
-				 (timestamps[2] < timestamps[1] || !ready[1]));
+/* Tag order checks. (Annoyingly many order checks too). */
+
+tag_ordering _tso01(wb_tags[0], wb_tags[1], tso01);
+tag_ordering _tso02(wb_tags[0], wb_tags[2], tso02);
+tag_ordering _tso10(wb_tags[1], wb_tags[0], tso10);
+tag_ordering _tso12(wb_tags[1], wb_tags[2], tso12);
+tag_ordering _tso20(wb_tags[2], wb_tags[0], tso20);
+tag_ordering _tso21(wb_tags[2], wb_tags[1], tso21);
+
+assign run[0] = ready[0] &&	((tso01 || !ready[1]) && (tso02 || !ready[2]));
+assign run[1] = ready[1] && ((tso10 || !ready[0]) && (tso12 || !ready[2]));
+assign run[2] = ready[2] && ((tso20 || !ready[0]) && (tso21 || !ready[1]));
 
 assign running = |run;
 
@@ -370,23 +501,23 @@ wire rename;
 
 /* Newest writeback tag generated by the renamer. */
 
-wire [4:0] new_tag_wb;
+wire [15:0] new_tag_wb;
 
 /* Operand tags found by the renamer. */
 
-wire [5:0] new_tag_a;
-wire [5:0] new_tag_b;
+wire [15:0] new_tag_a;
+wire [15:0] new_tag_b;
 
 /* value and tag for writeback from execution units. */
 
 wire committing;
-wire [4:0] writeback_tag;
+wire [15:0] writeback_tag;
 wire [31:0] writeback_value;
 
 /* Next entry in the commit queue to retire. */
 
 wire retire_next_commit;
-wire [5:0] retire_tag;
+wire [15:0] retire_tag;
 wire [31:0] retire_insn;
 wire [31:0] retire_value;
 
@@ -522,9 +653,9 @@ always @* begin
 	endcase
 end
 
-assign rename = get_next_insn &&
+assign rename = get_next_insn; /* &&
 				((xclass == C_DAB) || (xclass == C_DXB) ||
-				 (xclass == C_DXX) || (xclass == C_DIMM16));
+				 (xclass == C_DXX) || (xclass == C_DIMM16));*/
 
 register_renamer
 _register_renamer(
@@ -534,90 +665,23 @@ _register_renamer(
 	.nr_wb (nr_wb),
 	.nr_a (nr_a),
 	.nr_b (nr_b),
-	.clearing (retire_next_commit),
-	.tag_clear (retire_tag),
 	.tag_wb (new_tag_wb),
 	.tag_a (new_tag_a),
-	.tag_b (new_tag_b)
+	.tag_b (new_tag_b),
+	.clear_en (retire_next_commit),
+	.clear_tag (retire_tag)
 );
 
 /* Architectural registers. */
 
 reg [31:0] archregs [0:15];
 
-/* Decoded tag and value fields. */
-
-/* Can we all just agree that the way conbinational @* blocks are implemented
-   confuses everybody? */
-
-reg [5:0] decoded_tag_wb;
-reg [5:0] decoded_tag_a;
-reg [5:0] decoded_tag_b;
-reg [31:0] decoded_value_a;
-reg [31:0] decoded_value_b;
-
-/* Handle weird xclass stuff. */
-
-always @* begin
-	case (xclass)
-		C_DAB: begin
-			decoded_tag_wb <= {1'b1, new_tag_wb};
-			decoded_tag_a <= new_tag_a;
-			decoded_tag_b <= new_tag_b;
-			decoded_value_a <= new_tag_a[5] ? 0 : archregs[nr_a];
-			decoded_value_b <= new_tag_b[5] ? 0 : archregs[nr_b];
-		end
-		C_DXB: begin
-			decoded_tag_wb <= {1'b1, new_tag_wb};
-			decoded_tag_a <= 0;
-			decoded_tag_b <= new_tag_b;
-			decoded_value_a <= 0;
-			decoded_value_b <= new_tag_b[5] ? 0 : archregs[nr_b];
-		end
-		C_DXX: begin
-			decoded_tag_wb <= {1'b1, new_tag_wb};
-			decoded_tag_a <= 0;
-			decoded_tag_b <= 0;
-			decoded_value_a <= 0;
-			decoded_value_b <= 0;
-		end
-		C_XAB: begin
-			decoded_tag_wb <= 0;
-			decoded_tag_a <= new_tag_a;
-			decoded_tag_b <= new_tag_b;
-			decoded_value_a <= new_tag_a[5] ? 0 : archregs[nr_a];
-			decoded_value_b <= new_tag_b[5] ? 0 : archregs[nr_b];
-		end
-		C_XAX: begin
-			decoded_tag_wb <= 0;
-			decoded_tag_a <= new_tag_a;
-			decoded_tag_b <= 0;
-			decoded_value_a <= new_tag_a[5] ? 0 : archregs[nr_a];
-			decoded_value_b <= 0;
-		end
-		C_DIMM16: begin
-			decoded_tag_wb <= {1'b1, new_tag_wb};
-			decoded_tag_a <= 0;
-			decoded_tag_b <= 0;
-			decoded_value_a <= 0;
-			decoded_value_b <= insn[15:0];
-		end
-		C_IMM24: begin
-			decoded_tag_wb <= 0;
-			decoded_tag_a <= 0;
-			decoded_tag_b <= 0;
-			decoded_value_a <= 0;
-			decoded_value_b <= insn[23:0];
-		end
-		default: begin
-			decoded_tag_wb <= 0;
-			decoded_tag_a <= 0;
-			decoded_tag_b <= 0;
-			decoded_value_a <= 0;
-			decoded_value_b <= 0;
-		end
-	endcase
-end
+wire [31:0] rob_operand_a;
+wire rob_a_ready;
+wire rob_a_committed;
+wire [31:0] rob_operand_b;
+wire rob_b_ready;
+wire rob_b_committed;
 
 commit_queue
 _commit_queue(
@@ -629,8 +693,16 @@ _commit_queue(
 	.empty (),
 	.full (),
 	.committing (committing),
-	.new_tag_wb (decoded_tag_wb),
+	.new_tag_wb (new_tag_wb),
 	.new_insn (insn),
+	.operand_tag_a (new_tag_a),
+	.operand_a (rob_operand_a),
+	.operand_a_ready (rob_a_ready),
+	.operand_a_committed (rob_a_committed),
+	.operand_tag_b (new_tag_b),
+	.operand_b (rob_operand_b),
+	.operand_b_ready (rob_b_ready),
+	.operand_b_committed (rob_b_committed),
 	.common_writeback_tag (writeback_tag),
 	.common_writeback_value (writeback_value),
 	.retire_tag (retire_tag),
@@ -639,36 +711,130 @@ _commit_queue(
 	.tag_clear_en (retire_next_commit)
 );
 
-/* Timestamp counter for counting instruction timestamps. */
+always @(posedge clk) begin
+	if (retire_next_commit)
+		archregs[retire_insn[19:16]] <= retire_value;
+end
 
-reg [63:0] timestamp;
+reg [31:0] operand_a;
+reg operand_a_waiting;
+reg [31:0] operand_b;
+reg operand_b_waiting;
+
+always @* begin
+	if (rob_a_committed) begin
+		operand_a <= archregs[nr_a];
+		operand_a_waiting <= 0;
+	end
+	else if (rob_a_ready) begin
+		operand_a <= rob_operand_a;
+		operand_a_waiting <= 0;
+	end
+	else begin
+		operand_a <= 0;
+		operand_a_waiting <= 1;
+	end
+	if (xclass == C_DIMM16) begin
+		operand_b <= insn[15:0];
+		operand_b_waiting <= 0;
+	end
+	else if (xclass == C_IMM24) begin
+		operand_b <= insn[23:0];
+		operand_b_waiting <= 0;
+	end
+	else if (rob_b_committed) begin
+		operand_b <= archregs[nr_b];
+		operand_b_waiting <= 0;
+	end
+	else if (rob_b_ready) begin
+		operand_b <= rob_operand_b;
+		operand_b_waiting <= 0;
+	end
+	else begin
+		operand_b <= 0;
+		operand_b_waiting <= 1;
+	end
+end
+
+/* Decoded tag and value fields. */
+
+/* Can we all just agree that the way conbinational @* blocks are implemented
+   confuses everybody? */
+
+reg waitfor_a;
+reg waitfor_b;
+
+/* Handle weird xclass stuff. */
+
+always @* begin
+	case (xclass)
+		C_DAB: begin
+			waitfor_a <= operand_a_waiting;
+			waitfor_b <= operand_b_waiting;
+		end
+		C_DXB: begin
+			waitfor_a <= 0;
+			waitfor_b <= operand_b_waiting;
+		end
+		C_DXX: begin
+			waitfor_a <= 0;
+			waitfor_b <= 0;
+		end
+		C_XAB: begin
+			waitfor_a <= operand_a_waiting;
+			waitfor_b <= operand_b_waiting;
+		end
+		C_XAX: begin
+			waitfor_a <= operand_a_waiting;
+			waitfor_b <= 0;
+		end
+		C_DIMM16: begin
+			waitfor_a <= 0;
+			waitfor_b <= 0;
+		end
+		C_IMM24: begin
+			waitfor_a <= 0;
+			waitfor_b <= 0;
+		end
+		default: begin
+			waitfor_a <= 0;
+			waitfor_b <= 0;
+		end
+	endcase
+end
 
 /* Buffer between predecode and execution stage. */
 
-reg [181:0] dispatch_buffer;
+/* Buffer format:
+   [ 31:  0] - insn
+   [ 63: 32] - operand_b
+   [ 95: 64] - operand_a
+   [111: 96] - new_tag_b
+   [127:112] - new_tag_a
+   [128:128] - waitfor_b
+   [129:129] - waitfor_a
+   [145:130] - new_tag_wb
+   [148:146] - xclass
+   [152:149] - execution_unit
+   */
+
+reg [152:0] dispatch_buffer;
 
 always @(posedge clk) begin
-	if (rst) begin
-		dispatch_buffer[181:178] <= EU_ALU;
-		dispatch_buffer[177:114] <= 0;
-		dispatch_buffer[113:108] <= 5'h10;
-		dispatch_buffer[107: 32] <= 0;
-		dispatch_buffer[ 31:  0] <= 31'h05000000;
-	end
+	if (rst)
+		dispatch_buffer <= 0;
 	else begin
-		dispatch_buffer[181:178] <= execution_unit;
-		dispatch_buffer[177:114] <= timestamp;
-		dispatch_buffer[113:108] <= decoded_tag_wb;
-		dispatch_buffer[107:102] <= decoded_tag_a;
-		dispatch_buffer[101: 70] <= decoded_value_a;
-		dispatch_buffer[ 69: 64] <= decoded_tag_b;
-		dispatch_buffer[ 63: 32] <= decoded_value_b;
+		dispatch_buffer[152:149] <= execution_unit;
+		dispatch_buffer[148:146] <= xclass;
+		dispatch_buffer[145:130] <= new_tag_wb;
+		dispatch_buffer[    129] <= waitfor_a;
+		dispatch_buffer[    128] <= waitfor_b;
+		dispatch_buffer[127:112] <= new_tag_a;
+		dispatch_buffer[111: 96] <= new_tag_b;
+		dispatch_buffer[ 95: 64] <= operand_a;
+		dispatch_buffer[ 63: 32] <= operand_b;
 		dispatch_buffer[ 31:  0] <= insn;
 	end
-	if (rst)
-		timestamp <= 0;
-	else
-		timestamp <= timestamp + 1;
 end
 
 /* Managing reservation stations: Fairly simple mechanism, similar to renamer.
@@ -677,9 +843,9 @@ end
 
 /* EU_MEM. */
 
-wire eu_mem_incoming = dispatch_buffer[181:178] == EU_MEM;
+wire eu_mem_incoming = dispatch_buffer[152:149] == EU_MEM;
 wire eu_mem_running;
-wire [5:0] eu_mem_wb_tag;
+wire [15:0] eu_mem_wb_tag;
 wire [31:0] eu_mem_insn;
 wire [31:0] eu_mem_addr;
 wire [31:0] eu_mem_tostore;
@@ -693,13 +859,12 @@ eu_mem_reservation_station(
 	.clk (clk),
 	.rst (rst),
 	.new_incoming (eu_mem_incoming),
-	.new_wb_tag (dispatch_buffer[113:108]),
+	.new_wb_tag (dispatch_buffer[145:130]),
 	.new_insn (dispatch_buffer[31:0]),
-	.new_tag_a (dispatch_buffer[107:102]),
-	.new_value_a (dispatch_buffer[101:70]),
-	.new_tag_b (dispatch_buffer[69:64]),
+	.new_tag_a (dispatch_buffer[127:112]),
+	.new_value_a (dispatch_buffer[95:64]),
+	.new_tag_b (dispatch_buffer[111:96]),
 	.new_value_b (dispatch_buffer[63:32]),
-	.new_timestamp (dispatch_buffer[177:114]),
 	.next_wb_tag (eu_mem_wb_tag),
 	.next_insn (eu_mem_insn),
 	.next_value_a (eu_mem_tostore),
@@ -737,9 +902,9 @@ end
 
 /* EU_ALU. */
 
-wire eu_alu_incoming = dispatch_buffer[181:178] == EU_ALU;
+wire eu_alu_incoming = dispatch_buffer[152:149] == EU_ALU;
 wire eu_alu_running;
-wire [5:0] eu_alu_wb_tag;
+wire [15:0] eu_alu_wb_tag;
 wire [31:0] eu_alu_insn;
 wire [31:0] eu_alu_a;
 wire [31:0] eu_alu_b;
@@ -750,13 +915,14 @@ eu_alu_reservation_station(
 	.clk (clk),
 	.rst (rst),
 	.new_incoming (eu_alu_incoming),
-	.new_wb_tag (dispatch_buffer[113:108]),
+	.new_wb_tag (dispatch_buffer[145:130]),
 	.new_insn (dispatch_buffer[31:0]),
-	.new_tag_a (dispatch_buffer[107:102]),
-	.new_value_a (dispatch_buffer[101:70]),
-	.new_tag_b (dispatch_buffer[69:64]),
+	.waitfor_a (dispatch_buffer[129]),
+	.new_tag_a (dispatch_buffer[127:112]),
+	.new_value_a (dispatch_buffer[95:64]),
+	.waitfor_b (dispatch_buffer[128]),
+	.new_tag_b (dispatch_buffer[111:96]),
 	.new_value_b (dispatch_buffer[63:32]),
-	.new_timestamp (dispatch_buffer[177:114]),
 	.next_wb_tag (eu_alu_wb_tag),
 	.next_insn (eu_alu_insn),
 	.next_value_a (eu_alu_a),
@@ -802,7 +968,7 @@ assign push_new_insn = 1'b1;
 assign get_next_insn = 1'b1;
 assign out_addr = program_counter;
 assign writeback_tag = eu_alu_wb_tag[4:0];
-assign committing = eu_mem_wb_tag[5] || eu_alu_wb_tag[5];
+assign committing = eu_mem_running || eu_alu_running;
 assign writeback_value = eu_alu_wb;
 assign st8 = retire_value;
 
@@ -842,7 +1008,7 @@ _main(
 
 assign memread = mem[addr[9:0]];
 
-always @(posedge clk) begin
+/*always @(posedge clk) begin
 	if (rst) begin
 		mem[0] <= 31'h02000001;
 		mem[1] <= 31'h02050002;
@@ -852,6 +1018,45 @@ always @(posedge clk) begin
 	//else if () begin
 	//	mem[addr] <= towrite;
 	//end
+end*/
+
+initial begin
+	$dumpfile("dump.vcd");
+	$dumpvars(0, _main);
+	mem[0] <= 31'h02000001;
+	mem[1] <= 31'h02050002;
+	mem[2] <= 31'h02060003;
+	mem[3] <= 31'h020600ff;
+	mem[4] <= 31'h06080005;
+	rst = 1'b1;
+	clk = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
+	rst = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
 end
 
 endmodule
