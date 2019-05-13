@@ -368,21 +368,33 @@ for (i = 0; i < 3; i = i + 1) begin : set_operand_values
 		if (use_next[i] && !using[i]) begin
 			wb_tags[i] <= new_wb_tag;
 			insns[i] <= new_insn;
-			waiting_0[i] <= waitfor_a;
-			waiting_1[i] <= waitfor_b;
+			if (common_writeback_tag == new_tag_a) begin
+				waiting_0[i] <= 0;
+				vi_values[i] <= common_writeback_value;
+			end
+			else begin
+				waiting_0[i] <= waitfor_a;
+				vi_values[i] <= new_value_a;
+			end
+			if (common_writeback_tag == new_tag_b) begin
+				waiting_1[i] <= 0;
+				vj_values[i] <= common_writeback_value;
+			end
+			else begin
+				waiting_1[i] <= waitfor_b;
+				vj_values[i] <= new_value_b;
+			end
 			qi_tags[i] <= new_tag_a;
 			qj_tags[i] <= new_tag_b;
-			vi_values[i] <= new_value_a;
-			vj_values[i] <= new_value_b;
 		end
 		else if (run[i])
 			using[i] <= 0;
 		else if (using[i]) begin
-			if (common_writeback_tag == qi_tags[i] && waiting_0[i]) begin
+			if ((common_writeback_tag == qi_tags[i]) && waiting_0[i]) begin
 				vi_values[i] <= common_writeback_value;
 				waiting_0[i] <= 0;
 			end
-			if (common_writeback_tag == qj_tags[i] && waiting_1[i]) begin
+			if ((common_writeback_tag == qj_tags[i]) && waiting_1[i]) begin
 				vj_values[i] <= common_writeback_value;
 				waiting_1[i] <= 0;
 			end
@@ -660,10 +672,8 @@ reg [31:0] archregs [0:15];
 
 wire [31:0] rob_operand_a;
 wire rob_a_ready;
-wire rob_a_committed;
 wire [31:0] rob_operand_b;
 wire rob_b_ready;
-wire rob_b_committed;
 
 commit_queue
 _commit_queue(
@@ -706,6 +716,10 @@ always @* begin
 		operand_a <= archregs[nr_a];
 		operand_a_waiting <= 0;
 	end
+	else if (new_tag_a == writeback_tag) begin
+		operand_a <= writeback_value;
+		operand_a_waiting <= 0;
+	end
 	else if (rob_a_ready) begin
 		operand_a <= rob_operand_a;
 		operand_a_waiting <= 0;
@@ -724,6 +738,10 @@ always @* begin
 	end
 	else if (!tag_b_active) begin
 		operand_b <= archregs[nr_b];
+		operand_b_waiting <= 0;
+	end
+	else if (new_tag_b == writeback_tag) begin
+		operand_b <= writeback_value;
 		operand_b_waiting <= 0;
 	end
 	else if (rob_b_ready) begin
@@ -841,8 +859,10 @@ eu_mem_reservation_station(
 	.new_incoming (eu_mem_incoming),
 	.new_wb_tag (dispatch_buffer[145:130]),
 	.new_insn (dispatch_buffer[31:0]),
+	.waitfor_a (dispatch_buffer[129]),
 	.new_tag_a (dispatch_buffer[127:112]),
 	.new_value_a (dispatch_buffer[95:64]),
+	.waitfor_b (dispatch_buffer[128]),
 	.new_tag_b (dispatch_buffer[111:96]),
 	.new_value_b (dispatch_buffer[63:32]),
 	.next_wb_tag (eu_mem_wb_tag),
@@ -1006,8 +1026,7 @@ initial begin
 	mem[0] <= 31'h02000001;
 	mem[1] <= 31'h02050002;
 	mem[2] <= 31'h02060003;
-	mem[3] <= 31'h020600ff;
-	mem[4] <= 31'h06080005;
+	mem[3] <= 31'h06080605;
 	rst = 1'b1;
 	clk = 1'b0;
 	#10 clk = 1'b1;
