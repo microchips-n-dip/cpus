@@ -437,6 +437,76 @@ assign next_value_b = run[0] ? vj_values[0] :
 
 endmodule
 
+/* A 4-way round-robin arbiter for handling writebacks. */
+
+module arbiter_4(
+	input				clk,
+	input				rst,
+	input		[3:0]	request,
+	output reg	[3:0]	passthrough
+);
+
+reg		[3:0]	phase;
+reg		[2:0]	stop;
+
+always @(posedge clk) begin
+	if (rst)
+		phase <= 4'h1;
+	else begin
+		phase[0] <= phase[3];
+		phase[1] <= phase[0];
+		phase[2] <= phase[1];
+		phase[3] <= phase[2];
+	end
+end
+
+always @* begin
+	case (phase)
+		4'h1: begin
+			passthrough[0] <= request[0];
+			stop[0] <= request[0];
+			passthrough[1] <= request[1] && !stop[0];
+			stop[1] <= request[1] || stop[0];
+			passthrough[2] <= request[2] && !stop[1];
+			stop[2] <= request[2] || stop[1];
+			passthrough[3] <= request[3] && !stop[2];
+		end
+		4'h2: begin
+			passthrough[1] <= request[1];
+			stop[0] <= request[1];
+			passthrough[2] <= request[2] && !stop[0];
+			stop[1] <= request[2] || stop[0];
+			passthrough[3] <= request[3] && !stop[1];
+			stop[2] <= request[3] || stop[1];
+			passthrough[0] <= request[0] && !stop[2];
+		end
+		4'h4: begin
+			passthrough[2] <= request[2];
+			stop[0] <= request[2];
+			passthrough[3] <= request[3] && !stop[0];
+			stop[1] <= request[3] || stop[0];
+			passthrough[0] <= request[0] && !stop[1];
+			stop[2] <= request[0] || stop[1];
+			passthrough[1] <= request[1] && !stop[2];
+		end
+		4'h8: begin
+			passthrough[3] <= request[3];
+			stop[0] <= request[3];
+			passthrough[0] <= request[0] && !stop[0];
+			stop[1] <= request[0] || stop[0];
+			passthrough[1] <= request[1] && !stop[1];
+			stop[2] <= request[1] || stop[1];
+			passthrough[2] <= request[2] && !stop[2];
+		end
+		default: begin
+			passthrough <= 0;
+			stop <= 0;
+		end
+	endcase
+end
+
+endmodule
+
 /* All fetched instructions are placed on the pending queue. When an
    instruction is removed from the pending queue, it is assigned a renamed
    writeback register and an entry is made in the writeback ledger. It is also
@@ -499,9 +569,9 @@ wire [15:0] new_tag_b;
 
 /* value and tag for writeback from execution units. */
 
-wire committing;
-wire [15:0] writeback_tag;
-wire [31:0] writeback_value;
+reg committing;
+reg [15:0] writeback_tag;
+reg [31:0] writeback_value;
 
 /* Next entry in the commit queue to retire. */
 
@@ -967,25 +1037,50 @@ end
 assign push_new_insn = 1'b1;
 assign get_next_insn = 1'b1;
 assign out_addr = program_counter;
-assign writeback_tag = eu_alu_wb_tag[4:0];
-assign committing = eu_mem_running || eu_alu_running;
-assign writeback_value = eu_alu_wb;
 assign st8 = retire_value;
+
+wire [3:0] wben;
+
+arbiter_4
+writeback_arbiter(
+	.clk (clk),
+	.rst (rst),
+	.request ({1'b0, 1'b0, eu_alu_running, eu_mem_running}),
+	.passthrough (wben)
+);
+
+always @* begin
+	case (wben)
+		4'h1: begin
+			writeback_tag <= eu_mem_wb_tag;
+			committing <= eu_mem_running;
+			writeback_value <= eu_mem_wb;
+		end
+		4'h2: begin
+			writeback_tag <= eu_alu_wb_tag;
+			committing <= eu_alu_running;
+			writeback_value <= eu_alu_wb;
+		end
+		default: begin
+			writeback_tag <= 0;
+			committing <= 0;
+			writeback_value <= 0;
+		end
+	endcase
+end
 
 endmodule
 
 module
 cpu3(
-//	input notclk,
-//	input notrst,
+	input notclk,
+	input notrst,
 	input [7:0] in,
 	output [7:0] out
 );
 
-//wire clk = ~notclk;
-//wire rst = ~notrst;
-
-reg clk, rst;
+wire clk = ~notclk;
+wire rst = ~notrst;
 
 reg [31:0] mem [0:1023];
 
@@ -1008,54 +1103,21 @@ _main(
 
 assign memread = mem[addr[9:0]];
 
-/*always @(posedge clk) begin
+always @(posedge clk) begin
 	if (rst) begin
 		mem[0] <= 31'h02000001;
 		mem[1] <= 31'h02050002;
 		mem[2] <= 31'h02060003;
-		mem[3] <= 31'h06010609;
+		mem[3] <= 31'h06010605;
+		mem[4] <= 31'h02060004;
+		mem[5] <= 31'h06010600;
+		/* Testing load. */
+		mem[6] <= 31'h020000ff;
+		mem[255] <= 31'h00000069;
 	end
 	//else if () begin
 	//	mem[addr] <= towrite;
 	//end
-end*/
-
-initial begin
-	$dumpfile("dump.vcd");
-	$dumpvars(0, _main);
-	mem[0] <= 31'h02000001;
-	mem[1] <= 31'h02050002;
-	mem[2] <= 31'h02060003;
-	mem[3] <= 31'h06080605;
-	rst = 1'b1;
-	clk = 1'b0;
-	#10 clk = 1'b1;
-	#10 clk = 1'b0;
-	rst = 1'b0;
-	#10 clk = 1'b1;
-	#10 clk = 1'b0;
-	#10 clk = 1'b1;
-	#10 clk = 1'b0;
-	#10 clk = 1'b1;
-	#10 clk = 1'b0;
-	#10 clk = 1'b1;
-	#10 clk = 1'b0;
-	#10 clk = 1'b1;
-	#10 clk = 1'b0;
-	#10 clk = 1'b1;
-	#10 clk = 1'b0;
-	#10 clk = 1'b1;
-	#10 clk = 1'b0;
-	#10 clk = 1'b1;
-	#10 clk = 1'b0;
-	#10 clk = 1'b1;
-	#10 clk = 1'b0;
-	#10 clk = 1'b1;
-	#10 clk = 1'b0;
-	#10 clk = 1'b1;
-	#10 clk = 1'b0;
-	#10 clk = 1'b1;
-	#10 clk = 1'b0;
 end
 
 endmodule
