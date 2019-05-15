@@ -368,7 +368,7 @@ for (i = 0; i < 3; i = i + 1) begin : set_operand_values
 		if (use_next[i] && !using[i]) begin
 			wb_tags[i] <= new_wb_tag;
 			insns[i] <= new_insn;
-			if (common_writeback_tag == new_tag_a) begin
+			if (common_writeback_tag == new_tag_a && waitfor_a) begin
 				waiting_0[i] <= 0;
 				vi_values[i] <= common_writeback_value;
 			end
@@ -376,7 +376,7 @@ for (i = 0; i < 3; i = i + 1) begin : set_operand_values
 				waiting_0[i] <= waitfor_a;
 				vi_values[i] <= new_value_a;
 			end
-			if (common_writeback_tag == new_tag_b) begin
+			if (common_writeback_tag == new_tag_b && waitfor_b) begin
 				waiting_1[i] <= 0;
 				vj_values[i] <= common_writeback_value;
 			end
@@ -434,6 +434,8 @@ assign next_value_a = run[0] ? vi_values[0] :
 assign next_value_b = run[0] ? vj_values[0] :
 					  run[1] ? vj_values[1] :
 					  run[2] ? vj_values[2] : 0;
+
+wire [31:0] bprobe = vj_values[0];
 
 endmodule
 
