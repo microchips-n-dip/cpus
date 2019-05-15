@@ -164,7 +164,7 @@ always @* begin
 		offsetof <= vo - vt;
 	/* Rollover occured, diff = 0xffff - vt + vo. */
 	else
-		offsetof <= vo + (16'hffff - vt);
+		offsetof <= vo + (15'h7fff - vt);
 	location <= tail + offsetof[4:0];
 	exists <= location < head;
 end
@@ -437,9 +437,130 @@ assign next_value_b = run[0] ? vj_values[0] :
 
 endmodule
 
+/* Queue for memory accesses. */
+
+module
+memory_access_controller(
+	input				clk,
+	input				rst,
+	input		[31:0]	program_counter,
+	input				eu_request,
+	input		[15:0]	eu_tag,
+	input		[31:0]	eu_insn,
+	input		[31:0]	eu_operand,
+	input		[31:0]	eu_addr,
+	input				request_served,
+	output reg			push_insn,
+	output reg			eu_complete,
+	output		[15:0]	writeback_tag,
+	output reg	[31:0]	mem_addr,
+	output reg	[31:0]	mem_data,
+	output reg			write_please
+);
+
+/* Switch controlling whether to serve fetch stage or execution unit. */
+
+reg				control_switch;
+
+/* Execution unit request queue. */
+
+reg		[1:0]	head;
+reg		[1:0]	tail;
+
+reg		[15:0]	tags		[0:3];
+reg		[31:0]	insns		[0:3];
+reg		[31:0]	operand_0	[0:3];
+reg		[31:0]	operand_1	[0:3];
+
+wire	[15:0]	next_tag;
+wire	[31:0]	next_insn;
+wire	[31:0]	next_operand;
+wire	[31:0]	next_addr;
+
+wire			empty;
+wire			full;
+
+assign empty = tail == head;
+assign full = tail == head + 1;
+
+always @(posedge clk) begin
+	if (rst)
+		head <= 0;
+	else if (!full && eu_request) begin
+		tags[head] <= eu_tag;
+		insns[head] <= eu_insn;
+		operand_0[head] <= eu_operand;
+		operand_1[head] <= eu_addr;
+		head <= head + 1;
+	end
+	if (rst)
+		tail <= 0;
+	else if (!empty && eu_complete)
+		tail <= tail + 1;
+end
+
+assign writeback_tag = tags[tail];
+assign next_insn = insns[tail];
+assign next_operand = operand_0[tail];
+assign next_addr = operand_1[tail];
+
+always @* begin
+	/* Determine whether to push a new instruction. */
+	if (!control_switch && request_served)
+		push_insn <= 1;
+	else
+		push_insn <= 0;
+	/* Determine completion of an eu request for wb signaling. */
+	if (control_switch && request_served)
+		eu_complete <= 1;
+	else
+		eu_complete <= 0;
+	if (!control_switch) begin
+		mem_addr <= program_counter;
+		mem_data <= 0;
+		write_please <= 0;
+	end
+	else if (!empty) begin
+		mem_addr <= next_addr;
+		mem_data <= next_operand;
+		/* Select write status. */
+		case (next_insn[31:24])
+			8'h00: begin
+				write_please <= 0;
+			end
+			8'h01: begin
+				write_please <= 1;
+			end
+			default: begin
+				write_please <= 0;
+			end
+		endcase
+	end
+	else begin
+		mem_addr <= 0;
+		mem_data <= 0;
+		write_please <= 0;
+	end
+end
+
+always @(posedge clk) begin
+	if (rst)
+		control_switch <= 0;
+	/* The fetch stage has control and we want to transfer it to the eu. */
+	else if (!empty && !control_switch)
+		control_switch <= 1;
+	/* The eu has control and the request has been serviced, transfer control
+	   back to the fetch stage. */
+	else if (control_switch && request_served)
+		control_switch <= 0;
+end
+
+endmodule
+
 /* A 4-way round-robin arbiter for handling writebacks. */
 
-module arbiter_4(
+module
+arbiter_4(
 	input				clk,
 	input				rst,
 	input		[3:0]	request,
@@ -520,6 +641,8 @@ main(
 	input	[31:0]	in_mem,
 	output	[31:0]	out_addr,
 	output	[31:0]	out_mem,
+	input			request_served,
+	output			write_please,
 	output	[7:0]	st8
 );
 
@@ -917,10 +1040,10 @@ wire [15:0] eu_mem_wb_tag;
 wire [31:0] eu_mem_insn;
 wire [31:0] eu_mem_addr;
 wire [31:0] eu_mem_tostore;
-reg [31:0] eu_mem_wb;
+wire [31:0] eu_mem_wb;
 
-reg [31:0] eu_mem_out_addr;
-reg [31:0] eu_mem_out_mem;
+wire eu_mem_complete;
+wire [15:0] eu_mem_complete_writeback_tag;
 
 reservation_station
 eu_mem_reservation_station(
@@ -945,30 +1068,26 @@ eu_mem_reservation_station(
 	.none_free (none_free[0])
 );
 
-always @* begin
-	case (eu_mem_insn[31:24])
-		8'h00: begin
-			/* Take control of memory interface from fetch logic. */
-			eu_mem_out_addr <= eu_mem_addr;
-			eu_mem_out_mem <= 0;
-			eu_mem_wb <= in_mem;
-		end
-		8'h01: begin
-			/* Take control of memory interface from fetch logic. */
-			eu_mem_out_addr <= eu_mem_addr;
-			eu_mem_out_mem <= eu_mem_tostore;
-			eu_mem_wb <= 0;
-		end
-		default: begin
-			eu_mem_out_addr <= 0;
-			eu_mem_out_mem <= 0;
-			eu_mem_wb <= 0;
-		end
-	endcase
-end
+memory_access_controller
+_memory_access_controller(
+	.clk (clk),
+	.rst (rst),
+	.program_counter (program_counter),
+	.eu_request (eu_mem_running),
+	.eu_tag (eu_mem_wb_tag),
+	.eu_insn (eu_mem_insn),
+	.eu_operand (eu_mem_tostore),
+	.eu_addr (eu_mem_addr),
+	.request_served (request_served),
+	.push_insn (push_new_insn),
+	.eu_complete (eu_mem_complete),
+	.writeback_tag (eu_mem_complete_writeback_tag),
+	.mem_addr (out_addr),
+	.mem_data (out_mem),
+	.write_please (write_please)
+);
 
-//assign out_addr = eu_mem_out_addr;
-//assign out_mem = eu_mem_out_mem;
+assign eu_mem_wb = in_mem;
 
 /* EU_ALU. */
 
@@ -1034,9 +1153,9 @@ end
 
 /* Temporary direct forwarding for tests. */
 
-assign push_new_insn = 1'b1;
-assign get_next_insn = 1'b1;
-assign out_addr = program_counter;
+assign none_free[2] = 0;
+assign none_free[3] = 0;
+assign get_next_insn = !(|none_free);
 assign st8 = retire_value;
 
 wire [3:0] wben;
@@ -1045,15 +1164,15 @@ arbiter_4
 writeback_arbiter(
 	.clk (clk),
 	.rst (rst),
-	.request ({1'b0, 1'b0, eu_alu_running, eu_mem_running}),
+	.request ({1'b0, 1'b0, eu_alu_running, eu_mem_complete}),
 	.passthrough (wben)
 );
 
 always @* begin
 	case (wben)
 		4'h1: begin
-			writeback_tag <= eu_mem_wb_tag;
-			committing <= eu_mem_running;
+			writeback_tag <= eu_mem_complete_writeback_tag;
+			committing <= eu_mem_complete;
 			writeback_value <= eu_mem_wb;
 		end
 		4'h2: begin
@@ -1082,7 +1201,7 @@ cpu3(
 wire clk = ~notclk;
 wire rst = ~notrst;
 
-reg [31:0] mem [0:1023];
+reg [31:0] mem [0:31];
 
 /* If I did all 32 bits, I'd need 4294967296 addresses... */
 /* TODO: Use multibyte loading. */
@@ -1090,6 +1209,7 @@ reg [31:0] mem [0:1023];
 wire [31:0] addr;
 wire [31:0] memread;
 wire [31:0] towrite;
+wire write_please;
 
 main
 _main(
@@ -1098,26 +1218,32 @@ _main(
 	.in_mem (memread),
 	.out_addr (addr),
 	.out_mem (towrite),
+	.request_served (1'b1),
+	.write_please (write_please),
 	.st8 (out)
 );
 
-assign memread = mem[addr[9:0]];
+assign memread = mem[addr[5:0]];
 
 always @(posedge clk) begin
 	if (rst) begin
-		mem[0] <= 31'h02000001;
-		mem[1] <= 31'h02050002;
-		mem[2] <= 31'h02060003;
-		mem[3] <= 31'h06010605;
-		mem[4] <= 31'h02060004;
-		mem[5] <= 31'h06010600;
-		/* Testing load. */
-		mem[6] <= 31'h020000ff;
-		mem[255] <= 31'h00000069;
+		/* LDI r2, 0x10
+		   LOAD r4, r2
+		   LDI r2, 0x11
+		   LOAD r5, r2
+		   ADD r6, r4, r5
+		   */
+		mem[0] <= 31'h02020010;
+		mem[1] <= 31'h00040002;
+		mem[2] <= 31'h02020011;
+		mem[3] <= 31'h00050002;
+		mem[4] <= 31'h06060405;
+		mem[16] <= 31'h00000005;
+		mem[17] <= 31'h00000003;
 	end
-	//else if () begin
-	//	mem[addr] <= towrite;
-	//end
+	else if (write_please) begin
+		mem[addr[5:0]] <= towrite;
+	end
 end
 
 endmodule
