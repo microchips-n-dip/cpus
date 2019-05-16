@@ -368,22 +368,10 @@ for (i = 0; i < 3; i = i + 1) begin : set_operand_values
 		if (use_next[i] && !using[i]) begin
 			wb_tags[i] <= new_wb_tag;
 			insns[i] <= new_insn;
-			if (common_writeback_tag == new_tag_a && waitfor_a) begin
-				waiting_0[i] <= 0;
-				vi_values[i] <= common_writeback_value;
-			end
-			else begin
-				waiting_0[i] <= waitfor_a;
-				vi_values[i] <= new_value_a;
-			end
-			if (common_writeback_tag == new_tag_b && waitfor_b) begin
-				waiting_1[i] <= 0;
-				vj_values[i] <= common_writeback_value;
-			end
-			else begin
-				waiting_1[i] <= waitfor_b;
-				vj_values[i] <= new_value_b;
-			end
+			waiting_0[i] <= waitfor_a;
+			vi_values[i] <= new_value_a;
+			waiting_1[i] <= waitfor_b;
+			vj_values[i] <= new_value_b;
 			qi_tags[i] <= new_tag_a;
 			qj_tags[i] <= new_tag_b;
 		end
@@ -996,47 +984,13 @@ always @* begin
 	endcase
 end
 
-/* Buffer between predecode and execution stage. */
-
-/* Buffer format:
-   [ 31:  0] - insn
-   [ 63: 32] - operand_b
-   [ 95: 64] - operand_a
-   [111: 96] - new_tag_b
-   [127:112] - new_tag_a
-   [128:128] - waitfor_b
-   [129:129] - waitfor_a
-   [145:130] - new_tag_wb
-   [148:146] - xclass
-   [152:149] - execution_unit
-   */
-
-reg [152:0] dispatch_buffer;
-
-always @(posedge clk) begin
-	if (rst)
-		dispatch_buffer <= 0;
-	else begin
-		dispatch_buffer[152:149] <= execution_unit;
-		dispatch_buffer[148:146] <= xclass;
-		dispatch_buffer[145:130] <= new_tag_wb;
-		dispatch_buffer[    129] <= waitfor_a;
-		dispatch_buffer[    128] <= waitfor_b;
-		dispatch_buffer[127:112] <= new_tag_a;
-		dispatch_buffer[111: 96] <= new_tag_b;
-		dispatch_buffer[ 95: 64] <= operand_a;
-		dispatch_buffer[ 63: 32] <= operand_b;
-		dispatch_buffer[ 31:  0] <= insn;
-	end
-end
-
 /* Managing reservation stations: Fairly simple mechanism, similar to renamer.
    If no stations are free, stall everything above by disabling get_next_insn
    and wait for some retires. */
 
 /* EU_MEM. */
 
-wire eu_mem_incoming = dispatch_buffer[152:149] == EU_MEM;
+wire eu_mem_incoming = execution_unit == EU_MEM;
 wire eu_mem_running;
 wire [15:0] eu_mem_wb_tag;
 wire [31:0] eu_mem_insn;
@@ -1052,14 +1006,14 @@ eu_mem_reservation_station(
 	.clk (clk),
 	.rst (rst),
 	.new_incoming (eu_mem_incoming),
-	.new_wb_tag (dispatch_buffer[145:130]),
-	.new_insn (dispatch_buffer[31:0]),
-	.waitfor_a (dispatch_buffer[129]),
-	.new_tag_a (dispatch_buffer[127:112]),
-	.new_value_a (dispatch_buffer[95:64]),
-	.waitfor_b (dispatch_buffer[128]),
-	.new_tag_b (dispatch_buffer[111:96]),
-	.new_value_b (dispatch_buffer[63:32]),
+	.new_wb_tag (new_tag_wb),
+	.new_insn (insn),
+	.waitfor_a (waitfor_a),
+	.new_tag_a (new_tag_a),
+	.new_value_a (operand_a),
+	.waitfor_b (waitfor_b),
+	.new_tag_b (new_tag_b),
+	.new_value_b (operand_b),
 	.next_wb_tag (eu_mem_wb_tag),
 	.next_insn (eu_mem_insn),
 	.next_value_a (eu_mem_tostore),
@@ -1093,7 +1047,7 @@ assign eu_mem_wb = in_mem;
 
 /* EU_ALU. */
 
-wire eu_alu_incoming = dispatch_buffer[152:149] == EU_ALU;
+wire eu_alu_incoming = execution_unit == EU_ALU;
 wire eu_alu_running;
 wire [15:0] eu_alu_wb_tag;
 wire [31:0] eu_alu_insn;
@@ -1106,14 +1060,14 @@ eu_alu_reservation_station(
 	.clk (clk),
 	.rst (rst),
 	.new_incoming (eu_alu_incoming),
-	.new_wb_tag (dispatch_buffer[145:130]),
-	.new_insn (dispatch_buffer[31:0]),
-	.waitfor_a (dispatch_buffer[129]),
-	.new_tag_a (dispatch_buffer[127:112]),
-	.new_value_a (dispatch_buffer[95:64]),
-	.waitfor_b (dispatch_buffer[128]),
-	.new_tag_b (dispatch_buffer[111:96]),
-	.new_value_b (dispatch_buffer[63:32]),
+	.new_wb_tag (new_tag_wb),
+	.new_insn (insn),
+	.waitfor_a (waitfor_a),
+	.new_tag_a (new_tag_a),
+	.new_value_a (operand_a),
+	.waitfor_b (waitfor_b),
+	.new_tag_b (new_tag_b),
+	.new_value_b (operand_b),
 	.next_wb_tag (eu_alu_wb_tag),
 	.next_insn (eu_alu_insn),
 	.next_value_a (eu_alu_a),
@@ -1200,8 +1154,9 @@ cpu3(
 	output [7:0] out
 );
 
-wire clk = ~notclk;
-wire rst = ~notrst;
+//wire clk = ~notclk;
+//wire rst = ~notrst;
+reg clk, rst;
 
 reg [31:0] mem [0:31];
 
@@ -1235,17 +1190,60 @@ always @(posedge clk) begin
 		   LOAD r5, r2
 		   ADD r6, r4, r5
 		   */
-		mem[0] <= 31'h02020010;
-		mem[1] <= 31'h00040002;
-		mem[2] <= 31'h02020011;
-		mem[3] <= 31'h00050002;
-		mem[4] <= 31'h06060405;
-		mem[16] <= 31'h00000005;
-		mem[17] <= 31'h00000003;
+		//mem[0] <= 31'h02020010;
+		//mem[1] <= 31'h00040002;
+		//mem[2] <= 31'h02020011;
+		//mem[3] <= 31'h00050002;
+		//mem[4] <= 31'h06060405;
+		//mem[16] <= 31'h00000005;
+		//mem[17] <= 31'h00000003;
 	end
 	else if (write_please) begin
 		mem[addr[5:0]] <= towrite;
 	end
+end
+
+initial begin
+	$dumpfile ("dump.vcd");
+	$dumpvars (0, _main);
+	mem[0] <= 31'h02020010;
+	mem[1] <= 31'h00040002;
+	mem[2] <= 31'h02020011;
+	mem[3] <= 31'h00050002;
+	mem[4] <= 31'h06060405;
+	mem[16] <= 31'h00000005;
+	mem[17] <= 31'h00000003;
+	rst = 1'b1;
+	clk = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
+	rst = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
+	#10 clk = 1'b1;
+	#10 clk = 1'b0;
 end
 
 endmodule
