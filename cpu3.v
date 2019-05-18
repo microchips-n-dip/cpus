@@ -627,16 +627,16 @@ main(
 
 reg [31:0] program_counter;
 
-always @(posedge clk) begin
-	if (rst)
-		program_counter <= 0;
-	else
-		program_counter <= program_counter + 1;
-end
-
 /* Push a new instruction onto the pending queue. */
 
 wire push_new_insn;
+
+always @(posedge clk) begin
+	if (rst)
+		program_counter <= 0;
+	else if (push_new_insn)
+		program_counter <= program_counter + 1;
+end
 
 /* Fetch and decode stages will stall if there are no RSes free to receive a new
    instruction. */
@@ -645,6 +645,7 @@ wire [3:0] none_free;
 
 /* Indicate when to retrieve the next instruction from the pending queue. */
 
+wire none_pending;
 wire get_next_insn;
 
 /* Next instruction in the pending queue. */
@@ -687,7 +688,7 @@ _pending_queue(
 	.push (push_new_insn),
 	.next (get_next_insn),
 	.clear (1'b0),
-	.empty (),
+	.empty (none_pending),
 	.full (),
 	.in_insn (in_mem),
 	.out_insn (insn)
@@ -1098,7 +1099,7 @@ end
 
 assign none_free[2] = 0;
 assign none_free[3] = 0;
-assign get_next_insn = !(|none_free);
+assign get_next_insn = !(|none_free) && !none_pending;
 assign st8 = retire_value;
 
 wire [3:0] wben;
@@ -1198,6 +1199,8 @@ initial begin
 	mem[2] <= 31'h02020011;
 	mem[3] <= 31'h00050002;
 	mem[4] <= 31'h06060405;
+	mem[5] <= 31'h06060605;
+	mem[6] <= 31'h06060604;
 	mem[16] <= 31'h00000005;
 	mem[17] <= 31'h00000003;
 	rst = 1'b1;
