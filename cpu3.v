@@ -80,12 +80,17 @@ reg		[15:0]	active; /* A register has an active tag. */
 /* Allocate tags. */
 
 always @(posedge clk) begin
-	if (rst)
+	if (rst) begin
+		active <= 0;
 		counter <= 0;
+	end
 	else if (rename) begin
+		active[nr_wb] <= 1;
 		tag_map[nr_wb] <= counter;
 		counter <= counter + 1;
 	end
+	else if (clear_en)
+		active[nr_clear] <= 0;
 end
 
 assign tag_wb = counter;
@@ -93,24 +98,6 @@ assign tag_a = tag_map[nr_a];
 assign tag_a_active = active[nr_a];
 assign tag_b = tag_map[nr_b];
 assign tag_b_active = active[nr_b];
-
-/* Keep track of which registers have active tags and handle clearing them. */
-
-genvar i;
-
-generate
-for (i = 0; i < 16; i = i + 1) begin : track_active_tags
-	always @(posedge clk) begin
-		if (rst)
-			active[i] <= 0;
-		else if (rename && (i == nr_wb))
-			active[i] <= 1;
-		/* Replace clear_tag with nr_wb from retire_insn. */
-		else if (clear_en && (i == nr_clear))
-			active[i] <= 0;
-	end
-end
-endgenerate
 
 endmodule
 
