@@ -59,6 +59,11 @@ def create_reader(path):
 	reader.buffer.need_line = True
 	return reader
 
+def reset_reader(reader):
+	reader.buffer = Buffer()
+	reader.buffer.buffer = reader.file.buffer
+	reader.buffer.need_line = True
+
 def clean_line(reader):
 	s = reader.buffer.next_line
 	reader.buffer.need_line = False
@@ -201,6 +206,10 @@ class Parser:
 		self.tokens = []
 		self.tokens_avail = 0
 
+def reset_parser(parser):
+	parser.tokens = []
+	parser.tokens_avail = 0
+
 parse_in = None
 
 def peek_token(parser):
@@ -223,14 +232,32 @@ def expect(parser, tok_type, msg):
 		print(peek_token(parser).type)
 		error_at(peek_token(parser).location, msg)
 
+# Enumerated xclasses
+C_NONE		= 0x0;
+C_DAB		= 0x1;
+C_DXB		= 0x2;
+C_DXX		= 0x3;
+C_XAB		= 0x4;
+C_XAX		= 0x5;
+C_DIMM16	= 0x6;
+C_IMM24		= 0x7;
+
 class Instruction:
 	def __init__(self):
+		self.label = ""
+		self.xclass = C_NONE
 		self.code = -1
 		self.operands = []
 		self.oprs = [None, None, None]
 
 	def print(self):
 		print("{}\t{}".format(hex(self.code), self.oprs))
+
+labels = {}
+
+def define_label(label, offset):
+	global labels
+	labels[label] = offset
 
 def lookup_register(tok):
 	name = tok.val
@@ -277,54 +304,84 @@ IMMEDIATE = 0x02
 
 def lookup_instruction(tok, result):
 	if (tok.val == "load"):
+		result.xclass = C_DXB
 		result.code = 0x00
 		result.operands = [REGISTER, REGISTER]
 	elif (tok.val == "store"):
+		result.xclass = C_XAB
 		result.code = 0x01
 		result.operands = [REGISTER, REGISTER]
 	elif (tok.val == "ldi"):
+		result.xclass = C_DIMM16
 		result.code = 0x02
 		result.operands = [REGISTER, IMMEDIATE]
 	elif (tok.val == "push"):
+		result.xclass = C_XAX
 		result.code = 0x03
 		result.operands = [REGISTER]
 	elif (tok.val == "pop"):
+		result.xclass = C_DXX
 		result.code = 0x04
 		result.operands = [REGISTER]
 	elif (tok.val == "mov"):
+		result.xclass = C_DXB
 		result.code = 0x05
 		result.operands = [REGISTER, REGISTER]
 	elif (tok.val == "add"):
+		result.xclass = C_DAB
 		result.code = 0x06
 		result.operands = [REGISTER, REGISTER, REGISTER]
 	elif (tok.val == "sub"):
+		result.xclass = C_DAB
 		result.code = 0x07
 		result.operands = [REGISTER, REGISTER, REGISTER]
 	elif (tok.val == "cmp"):
+		result.xclass = C_XAB
 		result.code = 0x0f
 		result.operands = [REGISTER, REGISTER]
+	elif (tok.val == "beq"):
+		result.xclass = C_IMM24
+		result.code = 0x11
+		result.operands = [IMMEDIATE]
 	elif (tok.val == "bne"):
-		result.code = 0x12
-		result.operands = [REGISTER]
+		result.xclass = C_IMM24
+		result.code = 0x13
+		result.operands = [IMMEDIATE]
 	elif (tok.val == "bl"):
-		result.code = 0x1e
-		result.operands = [REGISTER]
+		result.xclass = C_IMM24
+		result.code = 0x1f
+		result.operands = [IMMEDIATE]
 	elif (tok.val == "b"):
+		result.xclass = C_IMM24
 		result.code = 0x20
 		result.operands = [REGISTER]
 	else:
 		error_at(tok.location, "unknown instruction '{}'".format(tok.val))
 
+def insn_size(insn):
+	# All instructions will be 4 bytes since the instruction set is 32 bits
+	# regardless.
+	return 4
+
+# Total number of bytes in the program (used for label definition).
+num_bytes = 0
+passnr = 0
+
 def register_operand(operand, result, tok):
 	if (result.operands[operand] & IMMEDIATE
 	    and tok.type == TOKEN_NUMBER):
 		result.oprs[operand] = tok.val
+	elif (result.operands[operand] & IMMEDIATE
+		  and tok.type == TOKEN_NAME):
+		# Look up a label
+		if (passnr > 0):
+			result.oprs[operand] = labels[tok.val]
 	elif (result.operands[operand] == IMMEDIATE):
 		error_at(tok.location, "expected immediate")
 	else:
 		result.oprs[operand] = lookup_register(tok)
 
-def assemble(parser):
+def parse_line(parser):
 	result = Instruction()
 	# Start by obtaining the label and instruction
 	while True:
@@ -332,7 +389,8 @@ def assemble(parser):
 		name_token = peek_token(parser)
 		consume_token(parser)
 		if (peek_token(parser).type == TOKEN_COLON):
-			# name_token indicates a label. Store the label and restart.
+			define_label(name_token.val, num_bytes)
+			result.label = name_token.val
 			consume_token(parser)
 			# Optional newline here, just consume it.
 			if (peek_token(parser).type == TOKEN_EOL):
@@ -355,13 +413,49 @@ def assemble(parser):
 	consume_token(parser)
 	return result
 
+def assemble_insn(target, insn):
+	result = ""
+	result += "{0:02x}".format(insn.code)
+	if (insn.xclass == C_DXB):
+		result += "{0:02x}".format(insn.oprs[0])
+		result += "00"
+		result += "{0:02x}".format(insn.oprs[1])
+	elif (insn.xclass == C_XAB):
+		result += "00"
+		result += "{0:02x}".format(insn.oprs[0])
+		result += "{0:02x}".format(insn.oprs[1])
+	elif (insn.xclass == C_DIMM16):
+		result += "{0:02x}".format(insn.oprs[0])
+		result += "{0:04x}".format(insn.oprs[1])
+	elif (insn.xclass == C_XAX):
+		result += "00"
+		result += "{0:02x}".format(insn.oprs[0])
+		result += "00"
+	elif (insn.xclass == C_DXX):
+		result += "{0:02x}".format(insn.oprs[0])
+		result += "0000"
+	elif (insn.xclass == C_DAB):
+		result += "{0:02x}".format(insn.oprs[0])
+		result += "{0:02x}".format(insn.oprs[1])
+		result += "{0:02x}".format(insn.oprs[2])
+	elif (insn.xclass == C_IMM24):
+		result += "{0:06x}".format(insn.oprs[0]) # lookup the label
+	print(result)
+
 def test_main(argc, argv):
-	global parse_in
+	global parse_in, num_bytes, passnr
 	parse_in = create_reader(argv[1])
 	parser = Parser()
 	while (peek_token(parser).type != TOKEN_EOF):
-		insn = assemble(parser)
-		insn.print()
+		insn = parse_line(parser)
+		change = insn_size(insn)
+		num_bytes += change
+	reset_reader(parse_in)
+	reset_parser(parser)
+	passnr = 1
+	while (peek_token(parser).type != TOKEN_EOF):
+		insn = parse_line(parser)
+		assemble_insn(None, insn)
 
 test_main(len(sys.argv), sys.argv)
 
