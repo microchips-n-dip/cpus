@@ -1,0 +1,37 @@
+recurse:
+	push	lr
+	push	fp
+	mov	fp, sp
+	ldi	r0, $0
+	ldi	r1, $12
+	add	r1, fp, r1
+	load	r1, r1
+	ldi	r2, $14
+	ldi	r3, $21
+	cmp	r0, r1
+	bne	r2
+	b	r3
+L0:
+	ldi	r0, $1
+	sub	r1, r1, r0
+	push	r1
+	ldi	r2, $1
+	bl	r2
+	mov	sp, fp		/* reset sp */
+L1:
+	pop	fp
+	pop	lr
+	b	lr
+main:
+	push	lr
+	push	fp
+	mov	fp, sp
+	ldi	r0, $4
+	push	r0
+	ldi	r2, $1
+	bl	r2
+	mov	sp, fp
+	pop	fp
+	pop	lr
+	b	lr
+

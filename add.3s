@@ -1,0 +1,26 @@
+addfunc:
+	push	lr		/* sp+8 */
+	push	fp		/* sp+4 */
+	mov	fp, sp
+	ldi	r0, $12
+	add	r0, fp, r0
+	load	r0, r0
+	ldi	r1, $16
+	add	r1, fp, r1
+	load	r1, r1
+	add	r0, r0, r1
+	pop	fp
+	pop	lr
+	b	lr
+main:
+	ldi	r0, $1
+	ldi	r1, $2
+	push	r1		/* sp+16 */
+	push	r0		/* sp+12 */
+	ldi	r0, $1
+	bl	r0		/* label impl */
+	mov	sp, fp
+	pop	fp
+	pop	lr
+	b	lr
+	
